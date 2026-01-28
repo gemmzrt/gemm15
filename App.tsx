@@ -137,10 +137,8 @@ export default function App() {
              if (profile) {
                 loginUser(profile);
              } else {
-                 // Session exists but no profile? Might be a fresh magic link login.
-                 // We need to wait for the user to enter the code to link it, 
-                 // OR check if we can recover the profile.
-                 await supabase.auth.signOut(); 
+                 // Session exists but no profile? Could be fresh login.
+                 // We don't sign out immediately to allow email link verification flow to complete if needed
              }
           }
         } catch (e) {
@@ -311,8 +309,8 @@ export default function App() {
               const { error } = await supabase.auth.signInWithOtp({ 
                   email,
                   options: {
-                      // We can't easily redirect with state, so we rely on session persistence.
-                      // Ideally, link redirect to specific URL.
+                      // CRITICAL FIX: Direct link to current origin (Netlify/Vercel URL) instead of localhost
+                      emailRedirectTo: window.location.origin
                   }
               });
               if (error) throw error;
@@ -521,14 +519,33 @@ export default function App() {
 
       useEffect(() => {
           if (activeTab === 'GUESTS' && !isMockMode) {
-              supabase.from('invites').select('*').order('created_at', { ascending: false }).then(({data}) => setInvites(data as any));
+              // CRITICAL FIX: Robust async fetch with error handling to prevent "map of null" crash
+              const fetchInvites = async () => {
+                 const { data, error } = await supabase.from('invites').select('*').order('created_at', { ascending: false });
+                 if (error) {
+                     console.error("Error fetching invites:", error);
+                     showToast("Error cargando invitados", "error");
+                     return;
+                 }
+                 setInvites((data as any) || []); // Default to empty array if null
+              };
+              fetchInvites();
           }
       }, [activeTab]);
 
       const createInvite = async () => {
           if (isMockMode) { showToast('Modo Demo: No se guarda en DB'); return; }
-          const { error } = await supabase.from('invites').insert({ code: newCode.toUpperCase(), segment: 'YOUNG', is_used: false });
-          if (!error) { showToast('Código creado'); setNewCode(''); }
+          const codeUpper = newCode.toUpperCase();
+          const { error } = await supabase.from('invites').insert({ code: codeUpper, segment: 'YOUNG', is_used: false });
+          if (!error) { 
+              showToast('Código creado'); 
+              setNewCode('');
+              // Refresh list immediately
+              const newInvite: InviteCodeType = { code: codeUpper, segment: UserSegment.YOUNG, is_used: false };
+              setInvites(prev => [newInvite, ...prev]);
+          } else {
+              showToast('Error al crear', 'error');
+          }
       };
 
       const updateTheme = async (key: keyof ThemeConfig, val: string) => {
@@ -600,6 +617,7 @@ export default function App() {
                           <div className="text-center opacity-50 p-10">Lista de invitados no disponible en Demo.</div>
                       ) : (
                           <div className="space-y-2">
+                              {invites.length === 0 && <p className="opacity-50 text-center py-4">No hay invitaciones creadas aún.</p>}
                               {invites.map(i => (
                                   <div key={i.code} className="p-3 bg-white/5 rounded border border-white/5 flex justify-between">
                                       <span>{i.code}</span>
