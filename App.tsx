@@ -5,7 +5,7 @@ import { UserProfile, EventConfig, ThemeConfig, RSVP, UserSegment, SongSuggestio
 import { 
   Loader2, MapPin, Music, Camera, MessageCircle, Calendar, CheckCircle, 
   XCircle, Upload, Send, Shield, Settings, LogOut, Info, AlertTriangle,
-  Plus, Trash2, Database, Wifi, WifiOff
+  Plus, Trash2, Database, Wifi, WifiOff, Mail, Lock
 } from 'lucide-react';
 
 // --- Constants & Mocks ---
@@ -22,13 +22,13 @@ const DEFAULT_THEME: ThemeConfig = {
 
 const MOCK_EVENT_CONFIG: EventConfig = {
   id: 1,
-  event_date: '2026-03-14T14:14:00-01:00',
+  event_date: '2026-03-14T14:00:00-01:00',
   location_name: 'Espacio de Eventos Mamá Lidia',
   location_address: 'Roldán, Santa Fé, Argentina',
   location_maps_url: 'https://maps.app.goo.gl/dqdYRr1XNrJgosyb7',
   time_young: '14:00',
   time_adult: '19:00',
-  spotify_playlist_url: 'https://open.spotify.com/playlist/2kDQscowES7i5yTx8oQ5yW?si=sje6BfQqT52B54sFiudCpg&pt=958a970789d4a0badc6a20a7a1840762&pi=AICKhFSjRaiC0',
+  spotify_playlist_url: 'https://open.spotify.com/',
   rules_young: 'Barra de tragos sin alcohol. Dress code: Semi-formal divertido.',
   rules_adult: 'Recepción 19hs. Dress code: Elegante Sport.',
   dress_code_young: 'Semi-formal',
@@ -98,6 +98,12 @@ export default function App() {
   const [inviteCode, setInviteCode] = useState('');
   const [authError, setAuthError] = useState('');
   const [toast, setToast] = useState<{msg: string, type: 'success'|'error'}|null>(null);
+  
+  // Auth Fallback State
+  const [authMode, setAuthMode] = useState<'CODE' | 'EMAIL_REQUIRED'>('CODE');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [magicLinkSent, setMagicLinkSent] = useState(false);
 
   // --- Effects ---
 
@@ -131,7 +137,10 @@ export default function App() {
              if (profile) {
                 loginUser(profile);
              } else {
-                await supabase.auth.signOut(); // Stale session
+                 // Session exists but no profile? Might be a fresh magic link login.
+                 // We need to wait for the user to enter the code to link it, 
+                 // OR check if we can recover the profile.
+                 await supabase.auth.signOut(); 
              }
           }
         } catch (e) {
@@ -143,7 +152,7 @@ export default function App() {
 
     initApp();
 
-    // C. Realtime Theme Subscription (Only in Real Mode)
+    // C. Realtime Theme Subscription
     if (!isMockMode) {
       const channel = supabase.channel('public:theme_config')
         .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'theme_config' }, (payload) => {
@@ -179,7 +188,6 @@ export default function App() {
     
     // Load User Data
     if (isMockMode) {
-       // Mock Data Load
        setMessages([
          { id: 1, user_id: 'system', text: '¡Bienvenid@s a la demo offline!', created_at: new Date().toISOString(), profiles: { name: 'Bot', id: 'bot', segment: UserSegment.ADULT, is_celiac: false, created_at: '' } }
        ]);
@@ -191,7 +199,6 @@ export default function App() {
          const { data: chatData } = await supabase.from('chat_messages').select('*, profiles(name, avatar_url)').order('created_at', { ascending: false }).limit(50);
          if (chatData) setMessages(chatData.reverse() as any);
 
-         // Chat Subscription
          supabase.channel('public:chat_messages')
           .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, async (payload) => {
             const { data: sender } = await supabase.from('profiles').select('name, avatar_url').eq('user_id', payload.new.user_id).single();
@@ -206,78 +213,163 @@ export default function App() {
 
   // --- Actions ---
 
-  const handleLogin = async () => {
+  const validateCode = async (code: string): Promise<InviteCodeType | null> => {
+      if (isMockMode) {
+          if (code === 'ADMIN-SETUP') return { code, segment: UserSegment.ADMIN, is_used: false };
+          return { code, segment: UserSegment.YOUNG, is_used: false };
+      }
+      
+      // If code is ADMIN-SETUP, return virtual invite
+      if (code === 'ADMIN-SETUP') return { code, segment: UserSegment.ADMIN, is_used: false };
+
+      // Check DB
+      const { data: invite } = await supabase.from('invites').select('*').eq('code', code).single();
+      if (!invite) throw new Error('Código inválido');
+      if (invite.is_used) throw new Error('Este código ya fue usado');
+      return invite;
+  };
+
+  const handleAuth = async () => {
     if (!inviteCode) return setAuthError('Ingresá tu código');
     setLoading(true);
     setAuthError('');
-
+    
     try {
         const code = inviteCode.toUpperCase();
-        let segment: UserSegment = UserSegment.YOUNG;
-        let isAdminLogin = false;
-
-        // 1. Validate Code
-        if (code === 'ADMIN-SETUP') {
-           isAdminLogin = true;
-           segment = UserSegment.ADMIN;
-        } else if (isMockMode) {
-           // Mock validation
-           if (code.includes('JOVEN')) segment = UserSegment.YOUNG;
-           else if (code.includes('ADULTO')) segment = UserSegment.ADULT;
-           else segment = UserSegment.YOUNG; // Default fallback for demo
-        } else {
-           // Real validation
-           const { data: invite } = await supabase.from('invites').select('*').eq('code', code).single();
-           if (!invite) throw new Error('Código inválido');
-           if (invite.is_used) throw new Error('Este código ya fue usado');
-           segment = invite.segment;
-        }
-
-        // 2. Authenticate
-        let userId = `mock-user-${Date.now()}`;
         
+        // 1. Validate Code First
+        const invite = await validateCode(code);
+        if (!invite) throw new Error('Error validando código');
+
+        let userId = '';
+
+        // 2. Try Anonymous Auth
         if (!isMockMode) {
-            const { data, error } = await supabase.auth.signInAnonymously();
-            if (error) throw error;
-            if (data.user) userId = data.user.id;
+            try {
+                const { data, error } = await supabase.auth.signInAnonymously();
+                if (error) throw error;
+                if (data.user) userId = data.user.id;
+            } catch (authErr: any) {
+                // FALLBACK: If anonymous is disabled, ask for email
+                if (authErr.message?.includes('Anonymous sign-ins are disabled') || authErr.code === 'not_allowed') {
+                    setAuthMode('EMAIL_REQUIRED');
+                    setLoading(false);
+                    return; // Stop here, render email form
+                }
+                throw authErr;
+            }
+        } else {
+            userId = `mock-user-${Date.now()}`;
         }
 
-        // 3. Create/Get Profile
-        const newProfile: UserProfile = {
-            id: userId,
-            name: isAdminLogin ? 'Administrador' : 'Invitado ' + code,
-            segment,
-            is_celiac: false,
-            created_at: new Date().toISOString()
-        };
-
-        if (!isMockMode) {
-             const { error: pError } = await supabase.from('profiles').upsert(newProfile);
-             if (pError) console.error("Profile save error", pError);
-             
-             // Mark invite used
-             if (!isAdminLogin) {
-                 await supabase.from('invites').update({ is_used: true, used_by: userId }).eq('code', code);
-             }
-        }
-
-        loginUser(newProfile);
+        // 3. If Auth Successful (Anonymous or Mock), Create Profile
+        await createProfileAndEnter(userId, invite);
 
     } catch (err: any) {
         setAuthError(err.message || 'Error de conexión');
-    } finally {
         setLoading(false);
     }
   };
 
+  const handleEmailAuth = async () => {
+      if (!email) return setAuthError('Ingresá tu email');
+      setLoading(true);
+      setAuthError('');
+
+      try {
+          const code = inviteCode.toUpperCase();
+          const invite = await validateCode(code);
+          if (!invite) throw new Error('Código inválido');
+
+          // Check if Admin Login
+          if (invite.code === 'ADMIN-SETUP') {
+               if (!password) {
+                   setAuthError('Ingresá una contraseña para el admin');
+                   setLoading(false);
+                   return;
+               }
+               // Try Login
+               const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+               if (error) {
+                   // If invalid login, try Sign Up (First time admin)
+                   if (error.message.includes('Invalid login')) {
+                       const { data: upData, error: upError } = await supabase.auth.signUp({ email, password });
+                       if (upError) throw upError;
+                       if (upData.user) {
+                           await createProfileAndEnter(upData.user.id, invite);
+                           return;
+                       } else {
+                           throw new Error('Verificá tu email para continuar.');
+                       }
+                   }
+                   throw error;
+               }
+               if (data.user) await createProfileAndEnter(data.user.id, invite);
+
+          } else {
+              // Guest Login - Magic Link
+              const { error } = await supabase.auth.signInWithOtp({ 
+                  email,
+                  options: {
+                      // We can't easily redirect with state, so we rely on session persistence.
+                      // Ideally, link redirect to specific URL.
+                  }
+              });
+              if (error) throw error;
+              setMagicLinkSent(true);
+              setLoading(false);
+          }
+      } catch (err: any) {
+          setAuthError(err.message || 'Error enviando email');
+          setLoading(false);
+      }
+  };
+
+  const createProfileAndEnter = async (userId: string, invite: InviteCodeType) => {
+      // Create/Get Profile
+      const isAdminLogin = invite.segment === UserSegment.ADMIN;
+      const newProfile: UserProfile = {
+          id: userId,
+          name: isAdminLogin ? 'Administrador' : 'Invitado ' + invite.code,
+          segment: invite.segment,
+          is_celiac: false,
+          created_at: new Date().toISOString()
+      };
+
+      if (!isMockMode) {
+           // Check if profile exists
+           const { data: existing } = await supabase.from('profiles').select('*').eq('user_id', userId).single();
+           
+           if (!existing) {
+               const { error: pError } = await supabase.from('profiles').insert(newProfile);
+               if (pError) console.error("Profile creation error", pError);
+               
+               // Mark invite used
+               if (!isAdminLogin && invite.code !== 'ADMIN-SETUP') {
+                   await supabase.from('invites').update({ is_used: true, used_by: userId }).eq('code', invite.code);
+               }
+           } else {
+               // Update local profile with existing data
+               newProfile.name = existing.name;
+               newProfile.segment = existing.segment;
+           }
+      }
+
+      await loginUser(newProfile);
+      setLoading(false);
+  };
+
   const handleLogout = async () => {
     if (!isMockMode) await supabase.auth.signOut();
-    // Clear local state
     setUser(null);
     setIsAdmin(false);
     setRsvp(null);
     setMessages([]);
     setInviteCode('');
+    setAuthMode('CODE');
+    setMagicLinkSent(false);
+    setEmail('');
+    setPassword('');
     setView('AUTH');
   };
 
@@ -546,14 +638,50 @@ export default function App() {
         <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
         <div className="relative z-10 w-full max-w-md bg-[var(--color-card)]/90 p-8 rounded-3xl shadow-2xl border border-white/10 text-center">
           <h1 className="text-4xl font-black mb-2 font-['Pacifico'] text-[var(--color-primary)]">Gemma 15</h1>
-          <p className="text-lg mb-8 opacity-80">Ingresá tu código de invitación</p>
-          {isMockMode && <div className="mb-4 text-xs bg-yellow-500/20 text-yellow-200 p-2 rounded">⚡ Modo Demo Offline Activo</div>}
-          <div className="space-y-4">
-            <Input value={inviteCode} onChange={(e: any) => setInviteCode(e.target.value.toUpperCase())} placeholder="CÓDIGO (Ej: GEMMA-JOVEN)" className="text-center text-xl tracking-widest uppercase font-mono" />
-            {authError && <div className="text-red-400 text-sm font-bold bg-red-500/10 p-2 rounded">{authError}</div>}
-            <Button onClick={handleLogin} className="w-full py-4 text-lg">Ingresar</Button>
-            <p className="text-xs opacity-50 mt-4">Tip: Usá 'ADMIN-SETUP' para configurar.</p>
-          </div>
+          
+          {authMode === 'CODE' ? (
+              <>
+                  <p className="text-lg mb-8 opacity-80">Ingresá tu código de invitación</p>
+                  {isMockMode && <div className="mb-4 text-xs bg-yellow-500/20 text-yellow-200 p-2 rounded">⚡ Modo Demo Offline Activo</div>}
+                  <div className="space-y-4">
+                    <Input value={inviteCode} onChange={(e: any) => setInviteCode(e.target.value.toUpperCase())} placeholder="CÓDIGO (Ej: GEMMA-JOVEN)" className="text-center text-xl tracking-widest uppercase font-mono" />
+                    {authError && <div className="text-red-400 text-sm font-bold bg-red-500/10 p-2 rounded">{authError}</div>}
+                    <Button onClick={handleAuth} className="w-full py-4 text-lg">Ingresar</Button>
+                    <p className="text-xs opacity-50 mt-4">Tip: Usá 'ADMIN-SETUP' para configurar.</p>
+                  </div>
+              </>
+          ) : (
+              // EMAIL/ADMIN FALLBACK
+              <>
+                  <p className="text-lg mb-4 opacity-80">{inviteCode === 'ADMIN-SETUP' ? 'Acceso Administrador' : 'Ingreso con Email'}</p>
+                  <p className="text-xs opacity-60 mb-6">El acceso anónimo está desactivado. {inviteCode === 'ADMIN-SETUP' ? 'Ingresá tus credenciales de admin.' : 'Usá tu email para validar el código.'}</p>
+                  
+                  {magicLinkSent ? (
+                      <div className="bg-green-500/20 p-4 rounded-xl text-green-200">
+                          <Mail size={40} className="mx-auto mb-2" />
+                          <p>¡Listo! Revisá tu correo y hacé clic en el link mágico para entrar.</p>
+                          <Button onClick={() => { setMagicLinkSent(false); setAuthMode('CODE'); }} variant="ghost" className="mt-4 text-sm">Volver</Button>
+                      </div>
+                  ) : (
+                      <div className="space-y-4">
+                        <Input value={email} onChange={(e: any) => setEmail(e.target.value)} placeholder="tu@email.com" type="email" />
+                        {inviteCode === 'ADMIN-SETUP' && (
+                             <Input value={password} onChange={(e: any) => setPassword(e.target.value)} placeholder="Contraseña Admin" type="password" />
+                        )}
+                        {authError && <div className="text-red-400 text-sm font-bold bg-red-500/10 p-2 rounded">{authError}</div>}
+                        
+                        <Button onClick={handleEmailAuth} className="w-full py-4 text-lg">
+                            {inviteCode === 'ADMIN-SETUP' ? 'Entrar / Registrar' : 'Enviar Link de Acceso'}
+                        </Button>
+                        
+                        <Button onClick={() => { setAuthMode('CODE'); setAuthError(''); }} variant="ghost" className="w-full text-sm">
+                           Volver
+                        </Button>
+                      </div>
+                  )}
+              </>
+          )}
+
         </div>
       </div>
     );
