@@ -1,0 +1,9 @@
+{
+  "name": "Gemma 15",
+  "description": "La app oficial para los 15 de Gemma. RSVP, fotos, música y chat para invitados.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
