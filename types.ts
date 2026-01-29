@@ -6,23 +6,25 @@ export enum UserSegment {
 }
 
 export interface UserProfile {
-  user_id: string; // Changed from id to match DB column strictly
+  user_id: string; // Matches 'user_id' in public.users
   name: string;
   segment: UserSegment;
   is_celiac: boolean;
   avatar_url?: string;
   created_at: string;
   table?: string; // Mesa asignada
+  rsvp_status?: 'CONFIRMED' | 'DECLINED' | 'PENDING'; // Integrated RSVP
+  rsvp_updated_at?: string;
 }
 
 export interface EventConfig {
   id: number;
-  event_date: string; // ISO string
+  event_date: string;
   location_name: string;
   location_address: string;
   location_maps_url: string;
-  time_young: string; // "14:00"
-  time_adult: string; // "19:00"
+  time_young: string;
+  time_adult: string;
   spotify_playlist_url: string;
   rules_young: string;
   rules_adult: string;
@@ -43,13 +45,6 @@ export interface ThemeConfig {
   motion_level: 'low' | 'medium' | 'high';
 }
 
-export interface RSVP {
-  user_id: string;
-  status: 'CONFIRMED' | 'DECLINED' | 'PENDING';
-  note?: string;
-  updated_at: string;
-}
-
 export interface SongSuggestion {
   id: number;
   user_id: string;
@@ -57,7 +52,7 @@ export interface SongSuggestion {
   comment: string;
   status: 'PENDING' | 'APPROVED' | 'REJECTED';
   created_at: string;
-  profiles?: UserProfile; // Joined
+  users?: UserProfile; // Joined table 'users'
 }
 
 export interface Photo {
@@ -67,21 +62,21 @@ export interface Photo {
   status: 'PENDING' | 'APPROVED' | 'REJECTED';
   is_featured: boolean;
   created_at: string;
-  url?: string; // Signed URL
-  profiles?: UserProfile;
+  url?: string;
+  users?: UserProfile; // Joined table 'users'
 }
 
 export interface ChatMessage {
   id: number;
-  user_id: string; // or 'ADMIN' for system messages
+  user_id: string;
   text: string;
   created_at: string;
-  profiles?: UserProfile;
+  users?: UserProfile; // Joined table 'users'
 }
 
 export interface InviteCode {
   code: string;
   segment: UserSegment;
   is_used: boolean;
-  used_by?: string; // user_id linked
+  used_by?: string;
 }

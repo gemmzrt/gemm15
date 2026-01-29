@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { supabase, isMockMode } from './services/supabaseClient';
-import { UserProfile, EventConfig, ThemeConfig, RSVP, UserSegment, SongSuggestion, Photo, ChatMessage, InviteCode as InviteCodeType } from './types';
+import { UserProfile, EventConfig, ThemeConfig, UserSegment, SongSuggestion, Photo, ChatMessage, InviteCode as InviteCodeType } from './types';
 import { 
   Loader2, MapPin, Music, Camera, MessageCircle, Calendar, CheckCircle, 
   XCircle, Upload, Send, Shield, Settings, LogOut, Info, AlertTriangle,
@@ -93,7 +93,6 @@ export default function App() {
   // Data State
   const [eventConfig, setEventConfig] = useState<EventConfig>(MOCK_EVENT_CONFIG);
   const [theme, setTheme] = useState<ThemeConfig>(DEFAULT_THEME);
-  const [rsvp, setRsvp] = useState<RSVP | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [publicPhotos, setPublicPhotos] = useState<Photo[]>([]);
   
@@ -134,7 +133,8 @@ export default function App() {
         try {
           const { data } = await supabase.auth.getSession();
           if (data?.session) {
-             const { data: profile } = await supabase.from('profiles').select('*').eq('user_id', data.session.user.id).single();
+             // Mapped to 'users' table
+             const { data: profile } = await supabase.from('users').select('*').eq('user_id', data.session.user.id).single();
              if (profile) {
                 loginUser(profile);
              }
@@ -178,7 +178,7 @@ export default function App() {
   const loginUser = async (profile: UserProfile) => {
     setUser(profile);
     
-    // Check if profile is complete (Name is required)
+    // Check if profile is complete
     if ((!profile.name || profile.name.startsWith('Invitado ')) && profile.segment !== 'ADMIN') {
         setView('PROFILE_SETUP');
     } else {
@@ -191,26 +191,24 @@ export default function App() {
   const loadUserData = async (userId: string) => {
       if (isMockMode) {
         setMessages([
-            { id: 1, user_id: 'system', text: '¡Bienvenid@s a la demo offline!', created_at: new Date().toISOString(), profiles: { name: 'Bot', user_id: 'bot', segment: UserSegment.ADULT, is_celiac: false, created_at: '' } }
+            { id: 1, user_id: 'system', text: '¡Bienvenid@s a la demo offline!', created_at: new Date().toISOString(), users: { name: 'Bot', user_id: 'bot', segment: UserSegment.ADULT, is_celiac: false, created_at: '' } }
         ]);
         return;
       }
 
       try {
-        const { data: rsvpData } = await supabase.from('rsvps').select('*').eq('user_id', userId).single();
-        if (rsvpData) setRsvp(rsvpData);
-
-        const { data: chatData } = await supabase.from('chat_messages').select('*, profiles(name, avatar_url)').order('created_at', { ascending: false }).limit(50);
+        // Mapped to 'messages' and 'users'
+        const { data: chatData } = await supabase.from('messages').select('*, users(name, avatar_url)').order('created_at', { ascending: false }).limit(50);
         if (chatData) setMessages(chatData.reverse() as any);
         
-        // Load approved photos for slideshow
-        const { data: photosData } = await supabase.from('photos').select('*, profiles(name)').eq('status', 'APPROVED').order('created_at', { ascending: false });
+        // Mapped to 'photos' and 'users'
+        const { data: photosData } = await supabase.from('photos').select('*, users(name)').eq('status', 'APPROVED').order('created_at', { ascending: false });
         if (photosData) setPublicPhotos(photosData as any);
 
-        supabase.channel('public:chat_messages')
-         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, async (payload) => {
-           const { data: sender } = await supabase.from('profiles').select('name, avatar_url').eq('user_id', payload.new.user_id).single();
-           setMessages(prev => [...prev, { ...payload.new, profiles: sender } as any]);
+        supabase.channel('public:messages')
+         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, async (payload) => {
+           const { data: sender } = await supabase.from('users').select('name, avatar_url').eq('user_id', payload.new.user_id).single();
+           setMessages(prev => [...prev, { ...payload.new, users: sender } as any]);
          })
          .subscribe();
       } catch (e) {
@@ -324,11 +322,12 @@ export default function App() {
       let existing: UserProfile | null = null;
 
       if (!isMockMode) {
-           const { data } = await supabase.from('profiles').select('*').eq('user_id', userId).single();
+           // Mapped to 'users'
+           const { data } = await supabase.from('users').select('*').eq('user_id', userId).single();
            existing = data;
            
            if (!existing) {
-               await supabase.from('profiles').insert(newProfile);
+               await supabase.from('users').insert(newProfile);
                if (!isAdminLogin && invite.code !== 'ADMIN-SETUP') {
                    await supabase.from('invites').update({ is_used: true, used_by: userId }).eq('code', invite.code);
                }
@@ -355,7 +354,8 @@ export default function App() {
              return;
           }
 
-          const { error } = await supabase.from('profiles').update({
+          // Mapped to 'users'
+          const { error } = await supabase.from('users').update({
               name,
               is_celiac: isCeliac
           }).eq('user_id', user!.user_id);
@@ -403,7 +403,7 @@ export default function App() {
   // --- Admin Panel Component ---
   const AdminPanel = () => {
       const [activeTab, setActiveTab] = useState<'GUESTS'|'PHOTOS'|'CONFIG'>('GUESTS');
-      const [guests, setGuests] = useState<any[]>([]); // Changed to guests, merging profiles and invites
+      const [guests, setGuests] = useState<any[]>([]); // Merged users + invites
       const [loadingData, setLoadingData] = useState(false);
       const [photos, setPhotos] = useState<Photo[]>([]);
 
@@ -418,19 +418,20 @@ export default function App() {
 
       const fetchGuests = async () => {
           setLoadingData(true);
-          // Fetch Profiles (The source of truth for people)
-          const { data: profiles } = await supabase.from('profiles').select('*');
+          // Fetch Users (The source of truth)
+          const { data: users } = await supabase.from('users').select('*');
           // Fetch Invites (To know who used what code)
           const { data: invites } = await supabase.from('invites').select('*');
           
-          if (profiles) {
+          if (users) {
               const inviteMap: any = {};
               invites?.forEach(i => { if(i.used_by) inviteMap[i.used_by] = i; });
 
-              // Combine: Profiles + their invite info
-              const combined = profiles.map(p => ({
-                  ...p,
-                  invite: inviteMap[p.user_id] || null
+              // Combine: Users + their invite info
+              const combined = users.map(u => ({
+                  ...u,
+                  invite: inviteMap[u.user_id] || null,
+                  // rsvp_status is now directly on the user object
               })).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
               
               setGuests(combined);
@@ -439,7 +440,7 @@ export default function App() {
       };
 
       const fetchPhotos = async () => {
-          const { data } = await supabase.from('photos').select('*, profiles(name)').order('created_at', { ascending: false });
+          const { data } = await supabase.from('photos').select('*, users(name)').order('created_at', { ascending: false });
           if (data) setPhotos(data as any);
       };
 
@@ -450,24 +451,32 @@ export default function App() {
           let startNum = 1;
           
           if (!isMockMode) {
-              // Get the last code with this prefix to increment
-              const { data: lastInvite } = await supabase.from('invites')
-                  .select('code')
-                  .like('code', `${prefix}%`)
-                  .order('code', { ascending: false })
-                  .limit(1)
-                  .single();
+              try {
+                  // Robustly get last code
+                  const { data: lastInvites, error } = await supabase.from('invites')
+                      .select('code')
+                      .like('code', `${prefix}%`)
+                      .order('code', { ascending: false })
+                      .limit(1);
 
-              if (lastInvite) {
-                  const numPart = lastInvite.code.replace(prefix, '');
-                  startNum = parseInt(numPart) + 1;
+                  if (error) {
+                      showToast('Error leyendo invites: ' + error.message, 'error');
+                      setGenerating(false);
+                      return;
+                  }
+
+                  if (lastInvites && lastInvites.length > 0) {
+                      const numPart = lastInvites[0].code.replace(prefix, '');
+                      startNum = parseInt(numPart) + 1;
+                  }
+              } catch (e) {
+                  console.error("Gen Error", e);
               }
           }
 
           const newInvites = [];
           for (let i = 0; i < genAmount; i++) {
               const currentNum = startNum + i;
-              // Format: G15-J01, G15-J10, G15-J100
               const paddedNum = currentNum.toString().padStart(2, '0');
               const code = `${prefix}${paddedNum}`;
               
@@ -484,7 +493,7 @@ export default function App() {
                   showToast('Error generando: ' + error.message, 'error');
               } else {
                   showToast(`Generados ${genAmount} códigos (${prefix}...)`);
-                  // Just refresh stats or simple list if we want, but "Guests" tab shows People
+                  fetchGuests();
               }
           } else {
              showToast(`Simulado: ${genAmount} códigos`);
@@ -494,10 +503,9 @@ export default function App() {
 
       const updateTable = async (userId: string, newTable: string) => {
           if (!userId) return;
-          const { error } = await supabase.from('profiles').update({ table: newTable }).eq('user_id', userId);
+          const { error } = await supabase.from('users').update({ table: newTable }).eq('user_id', userId);
           if (!error) {
               showToast('Mesa actualizada');
-              // Optimistic update
               setGuests(prev => prev.map(g => g.user_id === userId ? { ...g, table: newTable } : g));
           } else {
               showToast('Error al actualizar', 'error');
@@ -505,11 +513,12 @@ export default function App() {
       };
 
       const downloadCSV = () => {
-          const headers = ['Nombre', 'Código', 'Segmento', 'Celíaco', 'Mesa'];
+          const headers = ['Nombre', 'Código', 'Segmento', 'RSVP', 'Celíaco', 'Mesa'];
           const rows = guests.map(g => [
               g.name,
               g.invite?.code || 'N/A',
               g.segment,
+              g.rsvp_status || 'PENDING',
               g.is_celiac ? 'SI' : 'NO',
               g.table || '-'
           ]);
@@ -580,7 +589,7 @@ export default function App() {
                               <div className="col-span-3">Nombre</div>
                               <div className="col-span-2">Código</div>
                               <div className="col-span-1">Seg.</div>
-                              <div className="col-span-2">Celíaco</div>
+                              <div className="col-span-2">RSVP</div>
                               <div className="col-span-4">Mesa</div>
                           </div>
                           {loadingData ? <div className="p-8 text-center"><Loader2 className="animate-spin mx-auto"/></div> : 
@@ -589,7 +598,11 @@ export default function App() {
                                   <div className="col-span-3 font-bold truncate">{guest.name}</div>
                                   <div className="col-span-2 font-mono text-[var(--color-primary)] text-xs">{guest.invite?.code || 'ADMIN'}</div>
                                   <div className="col-span-1 opacity-70 text-[10px]">{guest.segment === 'YOUNG' ? 'JOV' : 'ADU'}</div>
-                                  <div className="col-span-2">{guest.is_celiac ? <span className="text-orange-400 font-bold flex gap-1 items-center"><Utensils size={12}/> SI</span> : <span className="opacity-30">NO</span>}</div>
+                                  <div className="col-span-2">
+                                      {guest.rsvp_status === 'CONFIRMED' && <span className="text-green-400 font-bold text-[10px]">SI</span>}
+                                      {guest.rsvp_status === 'DECLINED' && <span className="text-red-400 font-bold text-[10px]">NO</span>}
+                                      {(!guest.rsvp_status || guest.rsvp_status === 'PENDING') && <span className="opacity-30 text-[10px]">-</span>}
+                                  </div>
                                   <div className="col-span-4">
                                       <input 
                                         type="text" 
@@ -612,7 +625,7 @@ export default function App() {
                           <div key={photo.id} className="relative group rounded-xl overflow-hidden aspect-square bg-black">
                               <img src={isMockMode ? 'https://via.placeholder.com/300' : `${(import.meta as any).env.VITE_SUPABASE_URL}/storage/v1/object/public/user_photos/${photo.storage_path}`} className="object-cover w-full h-full" />
                               <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent opacity-90 flex flex-col justify-end p-2">
-                                  <p className="text-xs font-bold mb-2">{photo.profiles?.name}</p>
+                                  <p className="text-xs font-bold mb-2">{photo.users?.name}</p>
                                   <div className="flex gap-2">
                                       {photo.status === 'PENDING' && (
                                           <>
@@ -658,7 +671,7 @@ export default function App() {
                   {publicPhotos.slice(0, 10).map(p => (
                       <div key={p.id} className="snap-center shrink-0 w-32 h-32 rounded-lg overflow-hidden relative">
                            <img src={isMockMode ? 'https://via.placeholder.com/150' : `${(import.meta as any).env.VITE_SUPABASE_URL}/storage/v1/object/public/user_photos/${p.storage_path}`} className="w-full h-full object-cover" />
-                           <div className="absolute bottom-0 w-full bg-black/60 text-[8px] p-1 truncate text-center">{p.profiles?.name}</div>
+                           <div className="absolute bottom-0 w-full bg-black/60 text-[8px] p-1 truncate text-center">{p.users?.name}</div>
                       </div>
                   ))}
               </div>
@@ -675,14 +688,21 @@ export default function App() {
     const updateRsvp = async (status: 'CONFIRMED' | 'DECLINED') => {
         if (!user) return;
         
-        const newRsvp: RSVP = { user_id: user.user_id, status, updated_at: new Date().toISOString() };
-        setRsvp(newRsvp); 
+        // Optimistic update
+        const updatedUser = { ...user, rsvp_status: status };
+        setUser(updatedUser); 
 
         if (!isMockMode) {
-            const { error } = await supabase.from('rsvps').upsert(newRsvp);
+            // Update 'users' table instead of 'rsvps'
+            const { error } = await supabase.from('users').update({ 
+                rsvp_status: status,
+                rsvp_updated_at: new Date().toISOString()
+            }).eq('user_id', user.user_id);
+
             if (error) {
                 console.error("RSVP Error:", error);
-                showToast('Error de red: No se pudo guardar', 'error');
+                showToast(`Error de red: ${error.message || 'No se guardó'}`, 'error');
+                // Rollback if needed, but keeping it simple for now
             } else {
                 showToast('Asistencia actualizada');
             }
@@ -692,7 +712,7 @@ export default function App() {
     return (
         <Card title="Asistencia" icon={CheckCircle} className="md:col-span-1">
             <div className="flex flex-col gap-2 h-full justify-center">
-               {rsvp?.status === 'CONFIRMED' ? (
+               {user?.rsvp_status === 'CONFIRMED' ? (
                    <div className="bg-green-500/20 text-green-300 p-4 rounded-xl text-center">
                        <CheckCircle className="mx-auto mb-2" />
                        <p className="font-bold">¡Confirmado!</p>
@@ -728,15 +748,23 @@ export default function App() {
         }
 
         try {
-            // Sanitize filename to avoid S3/Storage issues
+            // Sanitize filename
             const fileExt = file.name.split('.').pop();
             const cleanName = file.name.replace(/[^a-zA-Z0-9]/g, '_');
             const fileName = `${user!.user_id}/${Date.now()}_${cleanName}.${fileExt}`;
             
+            // Upload to 'user_photos' bucket
             const { error: uploadError } = await supabase.storage.from('user_photos').upload(fileName, file);
 
-            if (uploadError) throw uploadError;
+            if (uploadError) {
+                console.error("Storage Error:", uploadError);
+                if (uploadError.message.includes('Bucket not found') || uploadError.message.includes('not found')) {
+                    throw new Error('Error: Bucket "user_photos" no encontrado. Verificá Supabase Storage.');
+                }
+                throw uploadError;
+            }
 
+            // Insert into 'photos' table
             const { error: dbError } = await supabase.from('photos').insert({
                 user_id: user!.user_id,
                 storage_path: fileName,
@@ -748,8 +776,8 @@ export default function App() {
 
             showToast('¡Foto enviada! El admin la revisará.');
         } catch (error: any) {
-            console.error("Upload Error:", error);
-            showToast('Error: ' + error.message, 'error');
+            console.error("Upload Logic Error:", error);
+            showToast(error.message || 'Error al subir', 'error');
         } finally {
             setUploading(false);
             if (fileInputRef.current) fileInputRef.current.value = '';
@@ -791,11 +819,12 @@ export default function App() {
         setText('');
 
         if (isMockMode) {
-            setMessages(prev => [...prev, { id: Date.now(), user_id: user!.user_id, text: msgText, created_at: new Date().toISOString(), profiles: user! }]);
+            setMessages(prev => [...prev, { id: Date.now(), user_id: user!.user_id, text: msgText, created_at: new Date().toISOString(), users: user! }]);
             return;
         }
 
-        await supabase.from('chat_messages').insert({
+        // Mapped to 'messages'
+        await supabase.from('messages').insert({
             user_id: user!.user_id,
             text: msgText
         });
@@ -807,10 +836,10 @@ export default function App() {
                 {messages.map((msg) => (
                     <div key={msg.id} className={`flex gap-3 ${msg.user_id === user?.user_id ? 'flex-row-reverse' : ''}`}>
                          <div className="w-8 h-8 rounded-full bg-[var(--color-primary)]/20 flex items-center justify-center text-[10px] font-bold overflow-hidden shrink-0">
-                             {msg.profiles?.avatar_url ? <img src={msg.profiles.avatar_url} className="w-full h-full object-cover"/> : (msg.profiles?.name?.[0] || '?')}
+                             {msg.users?.avatar_url ? <img src={msg.users.avatar_url} className="w-full h-full object-cover"/> : (msg.users?.name?.[0] || '?')}
                          </div>
                          <div className={`p-3 rounded-2xl max-w-[80%] text-sm ${msg.user_id === user?.user_id ? 'bg-[var(--color-primary)] text-white rounded-tr-none' : 'bg-white/5 rounded-tl-none'}`}>
-                             <p className="font-bold text-[10px] opacity-70 mb-1">{msg.profiles?.name}</p>
+                             <p className="font-bold text-[10px] opacity-70 mb-1">{msg.users?.name}</p>
                              {msg.text}
                          </div>
                     </div>
