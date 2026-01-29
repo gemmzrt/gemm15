@@ -134,12 +134,9 @@ export default function App() {
         try {
           const { data } = await supabase.auth.getSession();
           if (data?.session) {
-             // CRITICAL FIX: Ensure we use 'user_id' when querying to match DB column
              const { data: profile } = await supabase.from('profiles').select('*').eq('user_id', data.session.user.id).single();
              if (profile) {
                 loginUser(profile);
-             } else {
-                 // No profile exists yet
              }
           }
         } catch (e) {
@@ -187,7 +184,6 @@ export default function App() {
     } else {
         if (profile.segment === UserSegment.ADMIN) setIsAdmin(true);
         setView('HOME');
-        // CRITICAL FIX: Use user_id not id
         loadUserData(profile.user_id);
     }
   };
@@ -318,7 +314,7 @@ export default function App() {
       const isAdminLogin = invite.segment === UserSegment.ADMIN;
       
       const newProfile: UserProfile = {
-          user_id: userId, // CRITICAL FIX: Use user_id key
+          user_id: userId,
           name: isAdminLogin ? 'Administrador' : '', 
           segment: invite.segment,
           is_celiac: false,
@@ -359,7 +355,6 @@ export default function App() {
              return;
           }
 
-          // CRITICAL FIX: Use user!.user_id
           const { error } = await supabase.from('profiles').update({
               name,
               is_celiac: isCeliac
@@ -408,8 +403,8 @@ export default function App() {
   // --- Admin Panel Component ---
   const AdminPanel = () => {
       const [activeTab, setActiveTab] = useState<'GUESTS'|'PHOTOS'|'CONFIG'>('GUESTS');
-      const [invites, setInvites] = useState<any[]>([]);
-      const [loadingInvites, setLoadingInvites] = useState(false);
+      const [guests, setGuests] = useState<any[]>([]); // Changed to guests, merging profiles and invites
+      const [loadingData, setLoadingData] = useState(false);
       const [photos, setPhotos] = useState<Photo[]>([]);
 
       const [genAmount, setGenAmount] = useState(10);
@@ -417,33 +412,30 @@ export default function App() {
       const [generating, setGenerating] = useState(false);
 
       useEffect(() => {
-          if (activeTab === 'GUESTS' && !isMockMode) fetchInvites();
+          if (activeTab === 'GUESTS' && !isMockMode) fetchGuests();
           if (activeTab === 'PHOTOS' && !isMockMode) fetchPhotos();
       }, [activeTab]);
 
-      const fetchInvites = async () => {
-          setLoadingInvites(true);
-          const { data: invData } = await supabase.from('invites').select('*');
+      const fetchGuests = async () => {
+          setLoadingData(true);
+          // Fetch Profiles (The source of truth for people)
+          const { data: profiles } = await supabase.from('profiles').select('*');
+          // Fetch Invites (To know who used what code)
+          const { data: invites } = await supabase.from('invites').select('*');
           
-          if (invData) {
-              const usedIds = invData.filter(i => i.is_used && i.used_by).map(i => i.used_by);
-              let profilesMap: Record<string, UserProfile> = {};
-              
-              if (usedIds.length > 0) {
-                  const { data: profData } = await supabase.from('profiles').select('*').in('user_id', usedIds);
-                  if (profData) {
-                      profData.forEach(p => profilesMap[p.user_id] = p);
-                  }
-              }
-              
-              const combined = invData.map(i => ({
-                  ...i,
-                  profile: i.used_by ? profilesMap[i.used_by] : null
+          if (profiles) {
+              const inviteMap: any = {};
+              invites?.forEach(i => { if(i.used_by) inviteMap[i.used_by] = i; });
+
+              // Combine: Profiles + their invite info
+              const combined = profiles.map(p => ({
+                  ...p,
+                  invite: inviteMap[p.user_id] || null
               })).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
               
-              setInvites(combined);
+              setGuests(combined);
           }
-          setLoadingInvites(false);
+          setLoadingData(false);
       };
 
       const fetchPhotos = async () => {
@@ -453,44 +445,73 @@ export default function App() {
 
       const batchGenerate = async () => {
           setGenerating(true);
+          const prefix = genSegment === UserSegment.YOUNG ? 'G15-J' : 'G15-A';
+          
+          let startNum = 1;
+          
+          if (!isMockMode) {
+              // Get the last code with this prefix to increment
+              const { data: lastInvite } = await supabase.from('invites')
+                  .select('code')
+                  .like('code', `${prefix}%`)
+                  .order('code', { ascending: false })
+                  .limit(1)
+                  .single();
+
+              if (lastInvite) {
+                  const numPart = lastInvite.code.replace(prefix, '');
+                  startNum = parseInt(numPart) + 1;
+              }
+          }
+
           const newInvites = [];
           for (let i = 0; i < genAmount; i++) {
-              const randomNum = Math.floor(100000 + Math.random() * 900000); 
-              const prefix = genSegment === UserSegment.YOUNG ? 'JOVEN' : 'ADULTO';
+              const currentNum = startNum + i;
+              // Format: G15-J01, G15-J10, G15-J100
+              const paddedNum = currentNum.toString().padStart(2, '0');
+              const code = `${prefix}${paddedNum}`;
+              
               newInvites.push({
-                  code: `${prefix}-${randomNum}`,
+                  code: code,
                   segment: genSegment,
                   is_used: false
               });
           }
 
           if (!isMockMode) {
-              await supabase.from('invites').insert(newInvites);
-              fetchInvites();
+              const { error } = await supabase.from('invites').insert(newInvites);
+              if (error) {
+                  showToast('Error generando: ' + error.message, 'error');
+              } else {
+                  showToast(`Generados ${genAmount} códigos (${prefix}...)`);
+                  // Just refresh stats or simple list if we want, but "Guests" tab shows People
+              }
+          } else {
+             showToast(`Simulado: ${genAmount} códigos`);
           }
-          showToast(`Generados ${genAmount} códigos`);
           setGenerating(false);
       };
 
       const updateTable = async (userId: string, newTable: string) => {
           if (!userId) return;
-          // CRITICAL FIX: use user_id
           const { error } = await supabase.from('profiles').update({ table: newTable }).eq('user_id', userId);
           if (!error) {
               showToast('Mesa actualizada');
-              fetchInvites(); 
+              // Optimistic update
+              setGuests(prev => prev.map(g => g.user_id === userId ? { ...g, table: newTable } : g));
+          } else {
+              showToast('Error al actualizar', 'error');
           }
       };
 
       const downloadCSV = () => {
-          const headers = ['Código', 'Segmento', 'Estado', 'Nombre', 'Celíaco', 'Mesa'];
-          const rows = invites.map(i => [
-              i.code,
-              i.segment,
-              i.is_used ? 'Usado' : 'Libre',
-              i.profile?.name || '-',
-              i.profile?.is_celiac ? 'SI' : 'NO',
-              i.profile?.table || '-'
+          const headers = ['Nombre', 'Código', 'Segmento', 'Celíaco', 'Mesa'];
+          const rows = guests.map(g => [
+              g.name,
+              g.invite?.code || 'N/A',
+              g.segment,
+              g.is_celiac ? 'SI' : 'NO',
+              g.table || '-'
           ]);
           
           const csvContent = "data:text/csv;charset=utf-8," 
@@ -499,7 +520,7 @@ export default function App() {
           const encodedUri = encodeURI(csvContent);
           const link = document.createElement("a");
           link.setAttribute("href", encodedUri);
-          link.setAttribute("download", "invitados_gemma15.csv");
+          link.setAttribute("download", "lista_gemma15.csv");
           document.body.appendChild(link);
           link.click();
       };
@@ -524,7 +545,7 @@ export default function App() {
               {activeTab === 'GUESTS' && (
                   <div className="animate-in fade-in">
                       <div className="bg-white/5 p-6 rounded-2xl mb-8 border border-white/10">
-                          <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><Plus /> Generar Códigos por Lote</h3>
+                          <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><Plus /> Generar Códigos (Incremental)</h3>
                           <div className="flex flex-wrap gap-4 items-end">
                                <div>
                                    <label className="block text-xs uppercase mb-1 opacity-70">Cantidad</label>
@@ -537,49 +558,46 @@ export default function App() {
                                <div>
                                    <label className="block text-xs uppercase mb-1 opacity-70">Segmento</label>
                                    <select value={genSegment} onChange={(e) => setGenSegment(e.target.value as any)} className="bg-black/40 p-3 rounded-xl border border-white/10">
-                                       <option value="YOUNG">Jóvenes</option>
-                                       <option value="ADULT">Adultos</option>
+                                       <option value="YOUNG">Jóvenes (G15-J..)</option>
+                                       <option value="ADULT">Adultos (G15-A..)</option>
                                    </select>
                                </div>
                                <Button onClick={batchGenerate} disabled={generating} variant="primary">
-                                   {generating ? <Loader2 className="animate-spin" /> : 'Generar Códigos'}
+                                   {generating ? <Loader2 className="animate-spin" /> : 'Generar'}
                                </Button>
                           </div>
                       </div>
 
                       <div className="flex justify-between items-center mb-4">
-                          <div className="flex gap-4 text-sm font-bold">
-                              <span className="text-green-400">Usados: {invites.filter(i => i.is_used).length}</span>
-                              <span className="opacity-50">Libres: {invites.filter(i => !i.is_used).length}</span>
+                          <div className="text-sm font-bold opacity-70">
+                              Total Registrados: {guests.length}
                           </div>
                           <Button onClick={downloadCSV} variant="secondary" icon={Download} className="text-xs">Exportar Excel</Button>
                       </div>
 
                       <div className="bg-white/5 rounded-2xl overflow-hidden border border-white/10">
                           <div className="grid grid-cols-12 gap-2 p-4 bg-white/5 font-bold text-xs uppercase opacity-70">
+                              <div className="col-span-3">Nombre</div>
                               <div className="col-span-2">Código</div>
                               <div className="col-span-1">Seg.</div>
-                              <div className="col-span-3">Nombre</div>
                               <div className="col-span-2">Celíaco</div>
                               <div className="col-span-4">Mesa</div>
                           </div>
-                          {loadingInvites ? <div className="p-8 text-center"><Loader2 className="animate-spin mx-auto"/></div> : 
-                           invites.map(invite => (
-                              <div key={invite.code} className="grid grid-cols-12 gap-2 p-4 border-b border-white/5 items-center hover:bg-white/5 text-sm">
-                                  <div className="col-span-2 font-mono text-[var(--color-primary)]">{invite.code}</div>
-                                  <div className="col-span-1 opacity-70 text-[10px]">{invite.segment === 'YOUNG' ? 'JOV' : 'ADU'}</div>
-                                  <div className="col-span-3 font-bold truncate">{invite.profile?.name || <span className="opacity-30">-</span>}</div>
-                                  <div className="col-span-2">{invite.profile?.is_celiac ? <span className="text-orange-400 font-bold flex gap-1 items-center"><Utensils size={12}/> SI</span> : <span className="opacity-30">NO</span>}</div>
+                          {loadingData ? <div className="p-8 text-center"><Loader2 className="animate-spin mx-auto"/></div> : 
+                           guests.map(guest => (
+                              <div key={guest.user_id} className="grid grid-cols-12 gap-2 p-4 border-b border-white/5 items-center hover:bg-white/5 text-sm">
+                                  <div className="col-span-3 font-bold truncate">{guest.name}</div>
+                                  <div className="col-span-2 font-mono text-[var(--color-primary)] text-xs">{guest.invite?.code || 'ADMIN'}</div>
+                                  <div className="col-span-1 opacity-70 text-[10px]">{guest.segment === 'YOUNG' ? 'JOV' : 'ADU'}</div>
+                                  <div className="col-span-2">{guest.is_celiac ? <span className="text-orange-400 font-bold flex gap-1 items-center"><Utensils size={12}/> SI</span> : <span className="opacity-30">NO</span>}</div>
                                   <div className="col-span-4">
-                                      {invite.is_used && invite.used_by ? (
-                                          <input 
-                                            type="text" 
-                                            placeholder="Asignar Mesa"
-                                            defaultValue={invite.profile?.table || ''}
-                                            onBlur={(e) => updateTable(invite.used_by, e.target.value)}
-                                            className="w-full bg-black/30 border border-white/10 rounded px-2 py-1 text-xs focus:border-[var(--color-primary)] outline-none"
-                                          />
-                                      ) : <span className="opacity-20 text-xs italic">No registrado</span>}
+                                      <input 
+                                        type="text" 
+                                        placeholder="Mesa..."
+                                        defaultValue={guest.table || ''}
+                                        onBlur={(e) => updateTable(guest.user_id, e.target.value)}
+                                        className="w-full bg-black/30 border border-white/10 rounded px-2 py-1 text-xs focus:border-[var(--color-primary)] outline-none"
+                                      />
                                   </div>
                               </div>
                            ))}
@@ -589,6 +607,7 @@ export default function App() {
 
               {activeTab === 'PHOTOS' && (
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4 animate-in fade-in">
+                      {photos.length === 0 && <p className="opacity-50 col-span-full text-center py-10">No hay fotos para moderar.</p>}
                       {photos.map(photo => (
                           <div key={photo.id} className="relative group rounded-xl overflow-hidden aspect-square bg-black">
                               <img src={isMockMode ? 'https://via.placeholder.com/300' : `${(import.meta as any).env.VITE_SUPABASE_URL}/storage/v1/object/public/user_photos/${photo.storage_path}`} className="object-cover w-full h-full" />
@@ -655,14 +674,18 @@ export default function App() {
   const RSVPCard = () => {
     const updateRsvp = async (status: 'CONFIRMED' | 'DECLINED') => {
         if (!user) return;
-        // CRITICAL FIX: use user_id
+        
         const newRsvp: RSVP = { user_id: user.user_id, status, updated_at: new Date().toISOString() };
         setRsvp(newRsvp); 
 
         if (!isMockMode) {
             const { error } = await supabase.from('rsvps').upsert(newRsvp);
-            if (error) showToast('Error actualizando asistencia', 'error');
-            else showToast('Asistencia actualizada');
+            if (error) {
+                console.error("RSVP Error:", error);
+                showToast('Error de red: No se pudo guardar', 'error');
+            } else {
+                showToast('Asistencia actualizada');
+            }
         }
     };
 
@@ -704,31 +727,51 @@ export default function App() {
             return;
         }
 
-        // CRITICAL FIX: use user!.user_id
-        const fileName = `${user!.user_id}/${Date.now()}_${file.name}`;
-        const { error: uploadError } = await supabase.storage.from('user_photos').upload(fileName, file);
+        try {
+            // Sanitize filename to avoid S3/Storage issues
+            const fileExt = file.name.split('.').pop();
+            const cleanName = file.name.replace(/[^a-zA-Z0-9]/g, '_');
+            const fileName = `${user!.user_id}/${Date.now()}_${cleanName}.${fileExt}`;
+            
+            const { error: uploadError } = await supabase.storage.from('user_photos').upload(fileName, file);
 
-        if (uploadError) {
-            showToast('Error subiendo foto', 'error');
-        } else {
-            await supabase.from('photos').insert({
-                user_id: user!.user_id, // CRITICAL FIX
+            if (uploadError) throw uploadError;
+
+            const { error: dbError } = await supabase.from('photos').insert({
+                user_id: user!.user_id,
                 storage_path: fileName,
                 status: 'PENDING',
                 is_featured: false
             });
-            showToast('Foto enviada a aprobación');
+
+            if (dbError) throw dbError;
+
+            showToast('¡Foto enviada! El admin la revisará.');
+        } catch (error: any) {
+            console.error("Upload Error:", error);
+            showToast('Error: ' + error.message, 'error');
+        } finally {
+            setUploading(false);
+            if (fileInputRef.current) fileInputRef.current.value = '';
         }
-        setUploading(false);
     };
 
     return (
         <Card title="Subí tu Foto" icon={Camera} className="md:col-span-1">
-            <div className="h-full flex flex-col items-center justify-center border-2 border-dashed border-white/10 rounded-xl p-4 hover:border-[var(--color-primary)] transition-colors cursor-pointer" onClick={() => fileInputRef.current?.click()}>
+            <div className="h-full flex flex-col items-center justify-center border-2 border-dashed border-white/10 rounded-xl p-4 hover:border-[var(--color-primary)] transition-colors cursor-pointer" onClick={() => !uploading && fileInputRef.current?.click()}>
                 <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleUpload} />
-                {uploading ? <Loader2 className="animate-spin" /> : <Upload className="mb-2 opacity-50" />}
-                <p className="text-xs text-center font-bold">Tocá para subir</p>
-                <p className="text-[10px] opacity-50 text-center">Será parte del show</p>
+                {uploading ? (
+                    <div className="text-center">
+                        <Loader2 className="animate-spin mb-2 mx-auto" />
+                        <span className="text-xs">Subiendo...</span>
+                    </div>
+                ) : (
+                    <>
+                        <Upload className="mb-2 opacity-50" />
+                        <p className="text-xs text-center font-bold">Tocá para subir</p>
+                        <p className="text-[10px] opacity-50 text-center">Será parte del show</p>
+                    </>
+                )}
             </div>
         </Card>
     );
@@ -736,6 +779,11 @@ export default function App() {
 
   const ChatCard = () => {
     const [text, setText] = useState('');
+    const scrollRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }, [messages]);
     
     const sendMessage = async () => {
         if (!text.trim()) return;
@@ -748,14 +796,14 @@ export default function App() {
         }
 
         await supabase.from('chat_messages').insert({
-            user_id: user!.user_id, // CRITICAL FIX
+            user_id: user!.user_id,
             text: msgText
         });
     };
 
     return (
-        <Card title="Chat Invitados" icon={MessageCircle} className="md:col-span-2 row-span-2 h-[400px]">
-            <div className="flex-1 overflow-y-auto space-y-3 pr-2 mb-4 scrollbar-thin scrollbar-thumb-white/10">
+        <Card title="Chat Invitados" icon={MessageCircle} className="md:col-span-2 row-span-2 h-[400px] flex flex-col">
+            <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-3 pr-2 mb-4 scrollbar-thin scrollbar-thumb-white/10">
                 {messages.map((msg) => (
                     <div key={msg.id} className={`flex gap-3 ${msg.user_id === user?.user_id ? 'flex-row-reverse' : ''}`}>
                          <div className="w-8 h-8 rounded-full bg-[var(--color-primary)]/20 flex items-center justify-center text-[10px] font-bold overflow-hidden shrink-0">
@@ -768,7 +816,7 @@ export default function App() {
                     </div>
                 ))}
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 mt-auto">
                 <Input value={text} onChange={(e: any) => setText(e.target.value)} placeholder="Escribí un mensaje..." className="text-sm py-2" />
                 <Button onClick={sendMessage} className="px-3" icon={Send} />
             </div>
@@ -799,7 +847,7 @@ export default function App() {
                   <p className="text-lg mb-8 opacity-80">Ingresá tu código de invitación</p>
                   {isMockMode && <div className="mb-4 text-xs bg-yellow-500/20 text-yellow-200 p-2 rounded">⚡ Modo Demo Offline Activo</div>}
                   <div className="space-y-4">
-                    <Input value={inviteCode} onChange={(e: any) => setInviteCode(e.target.value.toUpperCase())} placeholder="CÓDIGO (Ej: JOVEN-123456)" className="text-center text-xl tracking-widest uppercase font-mono" />
+                    <Input value={inviteCode} onChange={(e: any) => setInviteCode(e.target.value.toUpperCase())} placeholder="CÓDIGO (Ej: G15-J01)" className="text-center text-xl tracking-widest uppercase font-mono" />
                     {authError && <div className="text-red-400 text-sm font-bold bg-red-500/10 p-2 rounded">{authError}</div>}
                     <Button onClick={handleAuth} className="w-full py-4 text-lg">Validar Código</Button>
                     <p className="text-xs opacity-50 mt-4">¿Sos Admin? Usá 'ADMIN-SETUP'</p>
