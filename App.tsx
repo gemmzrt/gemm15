@@ -138,7 +138,6 @@ export default function App() {
                 loginUser(profile);
              } else {
                  // Session exists but no profile? Could be fresh login.
-                 // We don't sign out immediately to allow email link verification flow to complete if needed
              }
           }
         } catch (e) {
@@ -516,35 +515,58 @@ export default function App() {
       const [activeTab, setActiveTab] = useState<'SYSTEM'|'THEME'|'GUESTS'>('SYSTEM');
       const [newCode, setNewCode] = useState('');
       const [invites, setInvites] = useState<InviteCodeType[]>([]);
+      const [loadingInvites, setLoadingInvites] = useState(false);
 
       useEffect(() => {
+          let mounted = true;
           if (activeTab === 'GUESTS' && !isMockMode) {
-              // CRITICAL FIX: Robust async fetch with error handling to prevent "map of null" crash
               const fetchInvites = async () => {
-                 const { data, error } = await supabase.from('invites').select('*').order('created_at', { ascending: false });
-                 if (error) {
-                     console.error("Error fetching invites:", error);
-                     showToast("Error cargando invitados", "error");
-                     return;
+                 setLoadingInvites(true);
+                 try {
+                     // Safer fetch: remove server-side ordering to prevent index errors
+                     const { data, error } = await supabase.from('invites').select('*');
+                     if (error) throw error;
+                     
+                     if (mounted && data) {
+                         // Sort in client side safely
+                         const sorted = (data as any[]).sort((a, b) => 
+                            (b.created_at || '').localeCompare(a.created_at || '')
+                         );
+                         setInvites(sorted);
+                     }
+                 } catch (err: any) {
+                     console.error("Error fetching invites:", err);
+                     if (mounted) showToast("Error al cargar lista", "error");
+                 } finally {
+                     if (mounted) setLoadingInvites(false);
                  }
-                 setInvites((data as any) || []); // Default to empty array if null
               };
               fetchInvites();
           }
+          return () => { mounted = false; };
       }, [activeTab]);
 
       const createInvite = async () => {
           if (isMockMode) { showToast('Modo Demo: No se guarda en DB'); return; }
           const codeUpper = newCode.toUpperCase();
-          const { error } = await supabase.from('invites').insert({ code: codeUpper, segment: 'YOUNG', is_used: false });
-          if (!error) { 
-              showToast('Código creado'); 
-              setNewCode('');
-              // Refresh list immediately
-              const newInvite: InviteCodeType = { code: codeUpper, segment: UserSegment.YOUNG, is_used: false };
-              setInvites(prev => [newInvite, ...prev]);
-          } else {
-              showToast('Error al crear', 'error');
+          if (!codeUpper) return;
+          
+          setLoadingInvites(true);
+          try {
+            const { error } = await supabase.from('invites').insert({ code: codeUpper, segment: 'YOUNG', is_used: false });
+            if (!error) { 
+                showToast('Código creado'); 
+                setNewCode('');
+                // Optimistic update
+                const newInvite: InviteCodeType = { code: codeUpper, segment: UserSegment.YOUNG, is_used: false };
+                setInvites(prev => [newInvite, ...(prev || [])]);
+            } else {
+                showToast('Error al crear: ' + error.message, 'error');
+            }
+          } catch(e) {
+            showToast('Error desconocido', 'error');
+          } finally {
+            setLoadingInvites(false);
           }
       };
 
@@ -611,14 +633,19 @@ export default function App() {
                   <div className="animate-in fade-in">
                       <div className="bg-white/5 p-4 rounded-xl mb-6 flex gap-2">
                           <Input value={newCode} onChange={(e: any) => setNewCode(e.target.value)} placeholder="NUEVO CÓDIGO" className="uppercase" />
-                          <Button onClick={createInvite}>Crear</Button>
+                          <Button onClick={createInvite} disabled={loadingInvites}>Crear</Button>
                       </div>
+                      
+                      {loadingInvites && <div className="text-center py-4"><Loader2 className="animate-spin inline mr-2"/>Cargando...</div>}
+                      
                       {isMockMode ? (
                           <div className="text-center opacity-50 p-10">Lista de invitados no disponible en Demo.</div>
                       ) : (
                           <div className="space-y-2">
-                              {invites.length === 0 && <p className="opacity-50 text-center py-4">No hay invitaciones creadas aún.</p>}
-                              {invites.map(i => (
+                              {!loadingInvites && invites && invites.length === 0 && <p className="opacity-50 text-center py-4">No hay invitaciones creadas aún.</p>}
+                              
+                              {/* Defensive rendering to prevent crashes if invites is null/undefined */}
+                              {invites && Array.isArray(invites) && invites.map(i => (
                                   <div key={i.code} className="p-3 bg-white/5 rounded border border-white/5 flex justify-between">
                                       <span>{i.code}</span>
                                       <span className={i.is_used ? 'text-red-400' : 'text-green-400'}>{i.is_used ? 'Usado' : 'Libre'}</span>
