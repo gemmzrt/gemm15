@@ -6,12 +6,13 @@ export enum UserSegment {
 }
 
 export interface UserProfile {
-  id: string; // uuid
+  user_id: string; // Changed from id to match DB column strictly
   name: string;
   segment: UserSegment;
   is_celiac: boolean;
   avatar_url?: string;
   created_at: string;
+  table?: string; // Mesa asignada
 }
 
 export interface EventConfig {
@@ -82,4 +83,5 @@ export interface InviteCode {
   code: string;
   segment: UserSegment;
   is_used: boolean;
+  used_by?: string; // user_id linked
 }

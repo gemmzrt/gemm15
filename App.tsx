@@ -5,7 +5,8 @@ import { UserProfile, EventConfig, ThemeConfig, RSVP, UserSegment, SongSuggestio
 import { 
   Loader2, MapPin, Music, Camera, MessageCircle, Calendar, CheckCircle, 
   XCircle, Upload, Send, Shield, Settings, LogOut, Info, AlertTriangle,
-  Plus, Trash2, Database, Wifi, WifiOff, Mail, Lock
+  Plus, Trash2, Database, Wifi, WifiOff, Mail, Lock, Download, Utensils, Users, Image as ImageIcon,
+  Check, X
 } from 'lucide-react';
 
 // --- Constants & Mocks ---
@@ -45,7 +46,8 @@ const Button = ({ children, onClick, variant = 'primary', className = '', disabl
     primary: "bg-[var(--color-primary)] text-white hover:brightness-110",
     secondary: "bg-[var(--color-card)] text-[var(--color-text)] border border-[var(--color-primary)] hover:bg-[var(--color-primary)] hover:text-white",
     ghost: "bg-transparent text-[var(--color-text)] hover:bg-white/10",
-    danger: "bg-red-500 text-white hover:bg-red-600"
+    danger: "bg-red-500 text-white hover:bg-red-600",
+    success: "bg-green-600 text-white hover:bg-green-700"
   };
 
   return (
@@ -86,13 +88,14 @@ export default function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<'AUTH' | 'HOME' | 'ADMIN'>('AUTH');
+  const [view, setView] = useState<'AUTH' | 'HOME' | 'ADMIN' | 'PROFILE_SETUP'>('AUTH');
   
   // Data State
   const [eventConfig, setEventConfig] = useState<EventConfig>(MOCK_EVENT_CONFIG);
   const [theme, setTheme] = useState<ThemeConfig>(DEFAULT_THEME);
   const [rsvp, setRsvp] = useState<RSVP | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [publicPhotos, setPublicPhotos] = useState<Photo[]>([]);
   
   // UI State
   const [inviteCode, setInviteCode] = useState('');
@@ -107,12 +110,10 @@ export default function App() {
 
   // --- Effects ---
 
-  // 1. Initial Load (Auth & Configs)
   useEffect(() => {
     const initApp = async () => {
       // A. Load Configs
       if (isMockMode) {
-        console.log("⚡ MOCK MODE ACTIVE: Using local defaults");
         setTheme(DEFAULT_THEME);
         setEventConfig(MOCK_EVENT_CONFIG);
       } else {
@@ -133,11 +134,12 @@ export default function App() {
         try {
           const { data } = await supabase.auth.getSession();
           if (data?.session) {
+             // CRITICAL FIX: Ensure we use 'user_id' when querying to match DB column
              const { data: profile } = await supabase.from('profiles').select('*').eq('user_id', data.session.user.id).single();
              if (profile) {
                 loginUser(profile);
              } else {
-                 // Session exists but no profile? Could be fresh login.
+                 // No profile exists yet
              }
           }
         } catch (e) {
@@ -149,7 +151,6 @@ export default function App() {
 
     initApp();
 
-    // C. Realtime Theme Subscription
     if (!isMockMode) {
       const channel = supabase.channel('public:theme_config')
         .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'theme_config' }, (payload) => {
@@ -160,7 +161,6 @@ export default function App() {
     }
   }, []);
 
-  // 2. Apply CSS Variables
   useEffect(() => {
     const root = document.documentElement;
     root.style.setProperty('--color-bg', theme.color_bg);
@@ -180,49 +180,70 @@ export default function App() {
 
   const loginUser = async (profile: UserProfile) => {
     setUser(profile);
-    if (profile.segment === UserSegment.ADMIN || profile.name === 'Administrador') setIsAdmin(true);
-    setView('HOME');
     
-    // Load User Data
-    if (isMockMode) {
-       setMessages([
-         { id: 1, user_id: 'system', text: '¡Bienvenid@s a la demo offline!', created_at: new Date().toISOString(), profiles: { name: 'Bot', id: 'bot', segment: UserSegment.ADULT, is_celiac: false, created_at: '' } }
-       ]);
+    // Check if profile is complete (Name is required)
+    if ((!profile.name || profile.name.startsWith('Invitado ')) && profile.segment !== 'ADMIN') {
+        setView('PROFILE_SETUP');
     } else {
-       try {
-         const { data: rsvpData } = await supabase.from('rsvps').select('*').eq('user_id', profile.id).single();
-         if (rsvpData) setRsvp(rsvpData);
-
-         const { data: chatData } = await supabase.from('chat_messages').select('*, profiles(name, avatar_url)').order('created_at', { ascending: false }).limit(50);
-         if (chatData) setMessages(chatData.reverse() as any);
-
-         supabase.channel('public:chat_messages')
-          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, async (payload) => {
-            const { data: sender } = await supabase.from('profiles').select('name, avatar_url').eq('user_id', payload.new.user_id).single();
-            setMessages(prev => [...prev, { ...payload.new, profiles: sender } as any]);
-          })
-          .subscribe();
-       } catch (e) {
-         console.error("User data load error", e);
-       }
+        if (profile.segment === UserSegment.ADMIN) setIsAdmin(true);
+        setView('HOME');
+        // CRITICAL FIX: Use user_id not id
+        loadUserData(profile.user_id);
     }
   };
 
+  const loadUserData = async (userId: string) => {
+      if (isMockMode) {
+        setMessages([
+            { id: 1, user_id: 'system', text: '¡Bienvenid@s a la demo offline!', created_at: new Date().toISOString(), profiles: { name: 'Bot', user_id: 'bot', segment: UserSegment.ADULT, is_celiac: false, created_at: '' } }
+        ]);
+        return;
+      }
+
+      try {
+        const { data: rsvpData } = await supabase.from('rsvps').select('*').eq('user_id', userId).single();
+        if (rsvpData) setRsvp(rsvpData);
+
+        const { data: chatData } = await supabase.from('chat_messages').select('*, profiles(name, avatar_url)').order('created_at', { ascending: false }).limit(50);
+        if (chatData) setMessages(chatData.reverse() as any);
+        
+        // Load approved photos for slideshow
+        const { data: photosData } = await supabase.from('photos').select('*, profiles(name)').eq('status', 'APPROVED').order('created_at', { ascending: false });
+        if (photosData) setPublicPhotos(photosData as any);
+
+        supabase.channel('public:chat_messages')
+         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, async (payload) => {
+           const { data: sender } = await supabase.from('profiles').select('name, avatar_url').eq('user_id', payload.new.user_id).single();
+           setMessages(prev => [...prev, { ...payload.new, profiles: sender } as any]);
+         })
+         .subscribe();
+      } catch (e) {
+        console.error("User data load error", e);
+      }
+  };
+
   // --- Actions ---
+  const handleLogout = async () => {
+    if (!isMockMode) await supabase.auth.signOut();
+    setUser(null);
+    setIsAdmin(false);
+    setInviteCode('');
+    setEmail('');
+    setPassword('');
+    setView('AUTH');
+    setAuthMode('CODE');
+  };
 
   const validateCode = async (code: string): Promise<InviteCodeType | null> => {
       if (isMockMode) {
           if (code === 'ADMIN-SETUP') return { code, segment: UserSegment.ADMIN, is_used: false };
           return { code, segment: UserSegment.YOUNG, is_used: false };
       }
-      
-      // If code is ADMIN-SETUP, return virtual invite
       if (code === 'ADMIN-SETUP') return { code, segment: UserSegment.ADMIN, is_used: false };
 
-      // Check DB
       const { data: invite } = await supabase.from('invites').select('*').eq('code', code).single();
       if (!invite) throw new Error('Código inválido');
-      if (invite.is_used) throw new Error('Este código ya fue usado');
+      if (invite.is_used) throw new Error('Este código ya fue activado. Ingresá con tu email.');
       return invite;
   };
 
@@ -233,34 +254,11 @@ export default function App() {
     
     try {
         const code = inviteCode.toUpperCase();
-        
-        // 1. Validate Code First
         const invite = await validateCode(code);
         if (!invite) throw new Error('Error validando código');
 
-        let userId = '';
-
-        // 2. Try Anonymous Auth
-        if (!isMockMode) {
-            try {
-                const { data, error } = await supabase.auth.signInAnonymously();
-                if (error) throw error;
-                if (data.user) userId = data.user.id;
-            } catch (authErr: any) {
-                // FALLBACK: If anonymous is disabled, ask for email
-                if (authErr.message?.includes('Anonymous sign-ins are disabled') || authErr.code === 'not_allowed') {
-                    setAuthMode('EMAIL_REQUIRED');
-                    setLoading(false);
-                    return; // Stop here, render email form
-                }
-                throw authErr;
-            }
-        } else {
-            userId = `mock-user-${Date.now()}`;
-        }
-
-        // 3. If Auth Successful (Anonymous or Mock), Create Profile
-        await createProfileAndEnter(userId, invite);
+        setAuthMode('EMAIL_REQUIRED'); 
+        setLoading(false);
 
     } catch (err: any) {
         setAuthError(err.message || 'Error de conexión');
@@ -275,398 +273,507 @@ export default function App() {
 
       try {
           const code = inviteCode.toUpperCase();
-          const invite = await validateCode(code);
+          const invite = await validateCode(code); 
           if (!invite) throw new Error('Código inválido');
 
-          // Check if Admin Login
           if (invite.code === 'ADMIN-SETUP') {
                if (!password) {
-                   setAuthError('Ingresá una contraseña para el admin');
-                   setLoading(false);
-                   return;
+                   setAuthError('Ingresá una contraseña');
+                   setLoading(false); return;
                }
-               // Try Login
                const { data, error } = await supabase.auth.signInWithPassword({ email, password });
                if (error) {
-                   // If invalid login, try Sign Up (First time admin)
                    if (error.message.includes('Invalid login')) {
                        const { data: upData, error: upError } = await supabase.auth.signUp({ email, password });
                        if (upError) throw upError;
                        if (upData.user) {
                            await createProfileAndEnter(upData.user.id, invite);
                            return;
-                       } else {
-                           throw new Error('Verificá tu email para continuar.');
-                       }
+                       } else throw new Error('Verificá tu email.');
                    }
                    throw error;
                }
                if (data.user) await createProfileAndEnter(data.user.id, invite);
 
           } else {
-              // Guest Login - Magic Link
               const { error } = await supabase.auth.signInWithOtp({ 
                   email,
                   options: {
-                      // CRITICAL FIX: Direct link to current origin (Netlify/Vercel URL) instead of localhost
-                      emailRedirectTo: window.location.origin
+                      emailRedirectTo: window.location.origin,
+                      data: { invite_code: code } 
                   }
               });
               if (error) throw error;
+              localStorage.setItem('pending_invite_code', code);
               setMagicLinkSent(true);
               setLoading(false);
           }
       } catch (err: any) {
-          setAuthError(err.message || 'Error enviando email');
+          setAuthError(err.message || 'Error');
           setLoading(false);
       }
   };
 
   const createProfileAndEnter = async (userId: string, invite: InviteCodeType) => {
-      // Create/Get Profile
       const isAdminLogin = invite.segment === UserSegment.ADMIN;
+      
       const newProfile: UserProfile = {
-          id: userId,
-          name: isAdminLogin ? 'Administrador' : 'Invitado ' + invite.code,
+          user_id: userId, // CRITICAL FIX: Use user_id key
+          name: isAdminLogin ? 'Administrador' : '', 
           segment: invite.segment,
           is_celiac: false,
           created_at: new Date().toISOString()
       };
 
+      let existing: UserProfile | null = null;
+
       if (!isMockMode) {
-           // Check if profile exists
-           const { data: existing } = await supabase.from('profiles').select('*').eq('user_id', userId).single();
+           const { data } = await supabase.from('profiles').select('*').eq('user_id', userId).single();
+           existing = data;
            
            if (!existing) {
-               const { error: pError } = await supabase.from('profiles').insert(newProfile);
-               if (pError) console.error("Profile creation error", pError);
-               
-               // Mark invite used
+               await supabase.from('profiles').insert(newProfile);
                if (!isAdminLogin && invite.code !== 'ADMIN-SETUP') {
                    await supabase.from('invites').update({ is_used: true, used_by: userId }).eq('code', invite.code);
                }
-           } else {
-               // Update local profile with existing data
-               newProfile.name = existing.name;
-               newProfile.segment = existing.segment;
            }
       }
-
-      await loginUser(newProfile);
+      await loginUser(existing || newProfile);
       setLoading(false);
   };
 
-  const handleLogout = async () => {
-    if (!isMockMode) await supabase.auth.signOut();
-    setUser(null);
-    setIsAdmin(false);
-    setRsvp(null);
-    setMessages([]);
-    setInviteCode('');
-    setAuthMode('CODE');
-    setMagicLinkSent(false);
-    setEmail('');
-    setPassword('');
-    setView('AUTH');
-  };
+  // --- Profile Setup Component ---
+  const ProfileSetup = () => {
+      const [name, setName] = useState('');
+      const [isCeliac, setIsCeliac] = useState(false);
+      const [saving, setSaving] = useState(false);
 
-  // --- Sub-Components ---
+      const saveProfile = async () => {
+          if (!name.trim()) return showToast('Ingresá tu nombre', 'error');
+          setSaving(true);
 
-  const RSVPCard = () => {
-    const [status, setStatus] = useState<RSVP['status']>(rsvp?.status || 'PENDING');
-    const [note, setNote] = useState(rsvp?.note || '');
-    const [saving, setSaving] = useState(false);
-
-    const saveRSVP = async (newStatus: RSVP['status']) => {
-        setSaving(true);
-        setStatus(newStatus);
-        
-        if (isMockMode) {
-            await new Promise(r => setTimeout(r, 800)); // Simulate net
-            setRsvp({ user_id: user!.id, status: newStatus, note, updated_at: new Date().toISOString() });
-            showToast('¡Guardado! (Modo Demo)');
-        } else {
-            const payload = { user_id: user!.id, status: newStatus, note, updated_at: new Date().toISOString() };
-            const { error } = await supabase.from('rsvps').upsert(payload);
-            if (error) showToast('Error al guardar', 'error');
-            else {
-                setRsvp(payload as RSVP);
-                showToast('¡Respuesta guardada!');
-            }
-        }
-        setSaving(false);
-    };
-
-    return (
-        <Card title="RSVP" icon={CheckCircle} className="md:col-span-2 bg-gradient-to-br from-[var(--color-card)] to-[var(--color-primary)]/10">
-            <h3 className="text-2xl font-bold mb-2">¿Venís a la fiesta?</h3>
-            <p className="opacity-80 mb-6">Confirmá para que sepamos cuántos somos.</p>
-            <div className="grid grid-cols-2 gap-3 mb-4">
-                <button onClick={() => saveRSVP('CONFIRMED')} className={`p-4 rounded-xl border-2 flex flex-col items-center gap-2 transition-all ${status === 'CONFIRMED' ? 'bg-green-500/20 border-green-500 text-green-400' : 'border-white/10 hover:bg-white/5'}`}>
-                    <CheckCircle /> ¡Sí, obvio!
-                </button>
-                <button onClick={() => saveRSVP('DECLINED')} className={`p-4 rounded-xl border-2 flex flex-col items-center gap-2 transition-all ${status === 'DECLINED' ? 'bg-red-500/20 border-red-500 text-red-400' : 'border-white/10 hover:bg-white/5'}`}>
-                    <XCircle /> No puedo :(
-                </button>
-            </div>
-            {status === 'CONFIRMED' && (
-                <div className="mt-2 animate-in fade-in">
-                    <Input value={note} onChange={(e: any) => setNote(e.target.value)} placeholder="Restricción alimentaria (opcional)" className="text-sm" />
-                    <button onClick={() => saveRSVP('CONFIRMED')} className="text-xs text-[var(--color-primary)] font-bold mt-2 hover:underline">
-                        {saving ? 'Guardando...' : 'Actualizar nota'}
-                    </button>
-                </div>
-            )}
-        </Card>
-    );
-  };
-
-  const ChatCard = () => {
-      const scrollRef = useRef<HTMLDivElement>(null);
-      const [text, setText] = useState('');
-
-      useEffect(() => {
-          if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      }, [messages]);
-
-      const send = async () => {
-          if (!text.trim() || !user) return;
-          const tempMsg = { id: Date.now(), user_id: user.id, text, created_at: new Date().toISOString(), profiles: user };
-          
-          setText('');
-          
           if (isMockMode) {
-              setMessages(prev => [...prev, tempMsg as any]);
+             const updated = { ...user!, name, is_celiac: isCeliac };
+             setUser(updated);
+             setView('HOME');
+             return;
+          }
+
+          // CRITICAL FIX: Use user!.user_id
+          const { error } = await supabase.from('profiles').update({
+              name,
+              is_celiac: isCeliac
+          }).eq('user_id', user!.user_id);
+
+          if (error) {
+              showToast('Error guardando perfil', 'error');
+              setSaving(false);
           } else {
-              setMessages(prev => [...prev, tempMsg as any]); // Optimistic
-              await supabase.from('chat_messages').insert({ user_id: user.id, text: tempMsg.text, room_id: 1 });
+              setUser({ ...user!, name, is_celiac: isCeliac });
+              setView('HOME');
+              loadUserData(user!.user_id);
           }
       };
 
       return (
-          <Card title="Chat General" icon={MessageCircle} className="md:col-span-2 md:row-span-2 h-[400px] flex flex-col">
-              <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-3 pr-2 mb-3">
-                  {messages.map((m) => {
-                      const isMe = m.user_id === user?.id;
-                      return (
-                          <div key={m.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
-                              <div className={`max-w-[80%] rounded-xl p-3 text-sm ${isMe ? 'bg-[var(--color-primary)] text-white rounded-br-none' : 'bg-white/10 rounded-bl-none'}`}>
-                                  {!isMe && <span className="text-[10px] opacity-70 block mb-1 font-bold">{m.profiles?.name}</span>}
-                                  {m.text}
+          <div className="min-h-screen flex items-center justify-center p-6 bg-[var(--color-bg)]">
+              <div className="w-full max-w-md bg-[var(--color-card)] p-8 rounded-3xl border border-[var(--color-primary)]/30 shadow-2xl">
+                  <h2 className="text-3xl font-black text-center mb-6 text-[var(--color-primary)] font-['Pacifico']">¡Hola!</h2>
+                  <p className="text-center mb-8 opacity-80">Antes de empezar, contanos quién sos para que Gemma sepa que viniste.</p>
+                  
+                  <div className="space-y-6">
+                      <div>
+                          <label className="block text-xs uppercase font-bold mb-2 opacity-70">Nombre y Apellido</label>
+                          <Input value={name} onChange={(e: any) => setName(e.target.value)} placeholder="Ej: Juan Pérez" className="text-lg" />
+                      </div>
+                      
+                      <div className="flex items-center gap-4 bg-white/5 p-4 rounded-xl border border-white/10">
+                          <Utensils className="text-orange-400" />
+                          <div className="flex-1">
+                              <span className="font-bold block">Soy Celíaco/a</span>
+                              <span className="text-xs opacity-60">Necesito menú sin TACC</span>
+                          </div>
+                          <input type="checkbox" checked={isCeliac} onChange={(e) => setIsCeliac(e.target.checked)} className="w-6 h-6 accent-[var(--color-primary)]" />
+                      </div>
+
+                      <Button onClick={saveProfile} disabled={saving} className="w-full py-4 text-lg">
+                          {saving ? <Loader2 className="animate-spin" /> : '¡Listo, a festejar!'}
+                      </Button>
+                  </div>
+              </div>
+          </div>
+      );
+  };
+
+  // --- Admin Panel Component ---
+  const AdminPanel = () => {
+      const [activeTab, setActiveTab] = useState<'GUESTS'|'PHOTOS'|'CONFIG'>('GUESTS');
+      const [invites, setInvites] = useState<any[]>([]);
+      const [loadingInvites, setLoadingInvites] = useState(false);
+      const [photos, setPhotos] = useState<Photo[]>([]);
+
+      const [genAmount, setGenAmount] = useState(10);
+      const [genSegment, setGenSegment] = useState<UserSegment>(UserSegment.YOUNG);
+      const [generating, setGenerating] = useState(false);
+
+      useEffect(() => {
+          if (activeTab === 'GUESTS' && !isMockMode) fetchInvites();
+          if (activeTab === 'PHOTOS' && !isMockMode) fetchPhotos();
+      }, [activeTab]);
+
+      const fetchInvites = async () => {
+          setLoadingInvites(true);
+          const { data: invData } = await supabase.from('invites').select('*');
+          
+          if (invData) {
+              const usedIds = invData.filter(i => i.is_used && i.used_by).map(i => i.used_by);
+              let profilesMap: Record<string, UserProfile> = {};
+              
+              if (usedIds.length > 0) {
+                  const { data: profData } = await supabase.from('profiles').select('*').in('user_id', usedIds);
+                  if (profData) {
+                      profData.forEach(p => profilesMap[p.user_id] = p);
+                  }
+              }
+              
+              const combined = invData.map(i => ({
+                  ...i,
+                  profile: i.used_by ? profilesMap[i.used_by] : null
+              })).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+              
+              setInvites(combined);
+          }
+          setLoadingInvites(false);
+      };
+
+      const fetchPhotos = async () => {
+          const { data } = await supabase.from('photos').select('*, profiles(name)').order('created_at', { ascending: false });
+          if (data) setPhotos(data as any);
+      };
+
+      const batchGenerate = async () => {
+          setGenerating(true);
+          const newInvites = [];
+          for (let i = 0; i < genAmount; i++) {
+              const randomNum = Math.floor(100000 + Math.random() * 900000); 
+              const prefix = genSegment === UserSegment.YOUNG ? 'JOVEN' : 'ADULTO';
+              newInvites.push({
+                  code: `${prefix}-${randomNum}`,
+                  segment: genSegment,
+                  is_used: false
+              });
+          }
+
+          if (!isMockMode) {
+              await supabase.from('invites').insert(newInvites);
+              fetchInvites();
+          }
+          showToast(`Generados ${genAmount} códigos`);
+          setGenerating(false);
+      };
+
+      const updateTable = async (userId: string, newTable: string) => {
+          if (!userId) return;
+          // CRITICAL FIX: use user_id
+          const { error } = await supabase.from('profiles').update({ table: newTable }).eq('user_id', userId);
+          if (!error) {
+              showToast('Mesa actualizada');
+              fetchInvites(); 
+          }
+      };
+
+      const downloadCSV = () => {
+          const headers = ['Código', 'Segmento', 'Estado', 'Nombre', 'Celíaco', 'Mesa'];
+          const rows = invites.map(i => [
+              i.code,
+              i.segment,
+              i.is_used ? 'Usado' : 'Libre',
+              i.profile?.name || '-',
+              i.profile?.is_celiac ? 'SI' : 'NO',
+              i.profile?.table || '-'
+          ]);
+          
+          const csvContent = "data:text/csv;charset=utf-8," 
+              + [headers.join(','), ...rows.map(e => e.join(','))].join("\n");
+          
+          const encodedUri = encodeURI(csvContent);
+          const link = document.createElement("a");
+          link.setAttribute("href", encodedUri);
+          link.setAttribute("download", "invitados_gemma15.csv");
+          document.body.appendChild(link);
+          link.click();
+      };
+
+      const moderatePhoto = async (photoId: number, status: 'APPROVED' | 'REJECTED') => {
+          await supabase.from('photos').update({ status }).eq('id', photoId);
+          fetchPhotos();
+      };
+
+      return (
+          <div className="p-4 md:p-8 bg-black/90 min-h-screen text-[var(--color-text)]">
+              <div className="flex justify-between items-center mb-8">
+                  <h2 className="text-3xl font-black text-[var(--color-primary)]">Admin Panel</h2>
+                  <Button onClick={() => { setView('HOME'); loadUserData(user!.user_id); }} variant="ghost">Volver a Home</Button>
+              </div>
+
+              <div className="flex gap-4 mb-6 border-b border-white/10 pb-2 overflow-x-auto">
+                  <button onClick={() => setActiveTab('GUESTS')} className={`pb-2 px-4 font-bold ${activeTab === 'GUESTS' ? 'text-[var(--color-primary)] border-b-2 border-[var(--color-primary)]' : 'opacity-50'}`}>Invitados & Mesas</button>
+                  <button onClick={() => setActiveTab('PHOTOS')} className={`pb-2 px-4 font-bold ${activeTab === 'PHOTOS' ? 'text-[var(--color-primary)] border-b-2 border-[var(--color-primary)]' : 'opacity-50'}`}>Fotos ({photos.filter(p => p.status === 'PENDING').length})</button>
+              </div>
+
+              {activeTab === 'GUESTS' && (
+                  <div className="animate-in fade-in">
+                      <div className="bg-white/5 p-6 rounded-2xl mb-8 border border-white/10">
+                          <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><Plus /> Generar Códigos por Lote</h3>
+                          <div className="flex flex-wrap gap-4 items-end">
+                               <div>
+                                   <label className="block text-xs uppercase mb-1 opacity-70">Cantidad</label>
+                                   <select value={genAmount} onChange={(e) => setGenAmount(Number(e.target.value))} className="bg-black/40 p-3 rounded-xl border border-white/10">
+                                       <option value={10}>10</option>
+                                       <option value={50}>50</option>
+                                       <option value={100}>100</option>
+                                   </select>
+                               </div>
+                               <div>
+                                   <label className="block text-xs uppercase mb-1 opacity-70">Segmento</label>
+                                   <select value={genSegment} onChange={(e) => setGenSegment(e.target.value as any)} className="bg-black/40 p-3 rounded-xl border border-white/10">
+                                       <option value="YOUNG">Jóvenes</option>
+                                       <option value="ADULT">Adultos</option>
+                                   </select>
+                               </div>
+                               <Button onClick={batchGenerate} disabled={generating} variant="primary">
+                                   {generating ? <Loader2 className="animate-spin" /> : 'Generar Códigos'}
+                               </Button>
+                          </div>
+                      </div>
+
+                      <div className="flex justify-between items-center mb-4">
+                          <div className="flex gap-4 text-sm font-bold">
+                              <span className="text-green-400">Usados: {invites.filter(i => i.is_used).length}</span>
+                              <span className="opacity-50">Libres: {invites.filter(i => !i.is_used).length}</span>
+                          </div>
+                          <Button onClick={downloadCSV} variant="secondary" icon={Download} className="text-xs">Exportar Excel</Button>
+                      </div>
+
+                      <div className="bg-white/5 rounded-2xl overflow-hidden border border-white/10">
+                          <div className="grid grid-cols-12 gap-2 p-4 bg-white/5 font-bold text-xs uppercase opacity-70">
+                              <div className="col-span-2">Código</div>
+                              <div className="col-span-1">Seg.</div>
+                              <div className="col-span-3">Nombre</div>
+                              <div className="col-span-2">Celíaco</div>
+                              <div className="col-span-4">Mesa</div>
+                          </div>
+                          {loadingInvites ? <div className="p-8 text-center"><Loader2 className="animate-spin mx-auto"/></div> : 
+                           invites.map(invite => (
+                              <div key={invite.code} className="grid grid-cols-12 gap-2 p-4 border-b border-white/5 items-center hover:bg-white/5 text-sm">
+                                  <div className="col-span-2 font-mono text-[var(--color-primary)]">{invite.code}</div>
+                                  <div className="col-span-1 opacity-70 text-[10px]">{invite.segment === 'YOUNG' ? 'JOV' : 'ADU'}</div>
+                                  <div className="col-span-3 font-bold truncate">{invite.profile?.name || <span className="opacity-30">-</span>}</div>
+                                  <div className="col-span-2">{invite.profile?.is_celiac ? <span className="text-orange-400 font-bold flex gap-1 items-center"><Utensils size={12}/> SI</span> : <span className="opacity-30">NO</span>}</div>
+                                  <div className="col-span-4">
+                                      {invite.is_used && invite.used_by ? (
+                                          <input 
+                                            type="text" 
+                                            placeholder="Asignar Mesa"
+                                            defaultValue={invite.profile?.table || ''}
+                                            onBlur={(e) => updateTable(invite.used_by, e.target.value)}
+                                            className="w-full bg-black/30 border border-white/10 rounded px-2 py-1 text-xs focus:border-[var(--color-primary)] outline-none"
+                                          />
+                                      ) : <span className="opacity-20 text-xs italic">No registrado</span>}
+                                  </div>
+                              </div>
+                           ))}
+                      </div>
+                  </div>
+              )}
+
+              {activeTab === 'PHOTOS' && (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 animate-in fade-in">
+                      {photos.map(photo => (
+                          <div key={photo.id} className="relative group rounded-xl overflow-hidden aspect-square bg-black">
+                              <img src={isMockMode ? 'https://via.placeholder.com/300' : `${(import.meta as any).env.VITE_SUPABASE_URL}/storage/v1/object/public/user_photos/${photo.storage_path}`} className="object-cover w-full h-full" />
+                              <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent opacity-90 flex flex-col justify-end p-2">
+                                  <p className="text-xs font-bold mb-2">{photo.profiles?.name}</p>
+                                  <div className="flex gap-2">
+                                      {photo.status === 'PENDING' && (
+                                          <>
+                                            <button onClick={() => moderatePhoto(photo.id, 'APPROVED')} className="flex-1 bg-green-500 text-white p-2 rounded hover:scale-105 transition"><Check size={16} className="mx-auto"/></button>
+                                            <button onClick={() => moderatePhoto(photo.id, 'REJECTED')} className="flex-1 bg-red-500 text-white p-2 rounded hover:scale-105 transition"><X size={16} className="mx-auto"/></button>
+                                          </>
+                                      )}
+                                      {photo.status === 'APPROVED' && <span className="text-green-400 text-xs font-bold bg-green-900/50 px-2 py-1 rounded">Aprobada</span>}
+                                      {photo.status === 'REJECTED' && <span className="text-red-400 text-xs font-bold bg-red-900/50 px-2 py-1 rounded">Rechazada</span>}
+                                  </div>
                               </div>
                           </div>
-                      );
-                  })}
-                  {messages.length === 0 && <div className="text-center opacity-50 mt-10">Sé el primero en saludar 👋</div>}
-              </div>
-              <div className="flex gap-2 mt-auto">
-                  <Input value={text} onChange={(e: any) => setText(e.target.value)} placeholder="Escribí un mensaje..." className="flex-1" />
-                  <Button onClick={send} className="px-3 rounded-xl"><Send size={18} /></Button>
-              </div>
-          </Card>
+                      ))}
+                  </div>
+              )}
+          </div>
       );
+  };
+
+  const TableCard = () => (
+      <Card title="Tu Mesa" icon={Users} className="md:col-span-1 bg-gradient-to-br from-[var(--color-card)] to-[var(--color-accent)]/20">
+          <div className="flex flex-col items-center justify-center h-full py-4">
+              {user?.table ? (
+                  <>
+                    <span className="text-4xl font-black text-[var(--color-accent)] animate-bounce font-['Pacifico']">{user.table}</span>
+                    <p className="text-sm opacity-70 mt-2">¡Ahí te esperan tus amigos!</p>
+                  </>
+              ) : (
+                  <div className="text-center opacity-50">
+                      <Users size={32} className="mx-auto mb-2 opacity-50"/>
+                      <p className="text-xs">Aún no tenés mesa asignada.</p>
+                      <p className="text-[10px] mt-1">Te avisaremos pronto.</p>
+                  </div>
+              )}
+          </div>
+      </Card>
+  );
+
+  const GalleryCard = () => (
+      <Card title="Momentos" icon={ImageIcon} className="md:col-span-2">
+          {publicPhotos.length > 0 ? (
+              <div className="flex gap-2 overflow-x-auto pb-2 snap-x">
+                  {publicPhotos.slice(0, 10).map(p => (
+                      <div key={p.id} className="snap-center shrink-0 w-32 h-32 rounded-lg overflow-hidden relative">
+                           <img src={isMockMode ? 'https://via.placeholder.com/150' : `${(import.meta as any).env.VITE_SUPABASE_URL}/storage/v1/object/public/user_photos/${p.storage_path}`} className="w-full h-full object-cover" />
+                           <div className="absolute bottom-0 w-full bg-black/60 text-[8px] p-1 truncate text-center">{p.profiles?.name}</div>
+                      </div>
+                  ))}
+              </div>
+          ) : (
+              <div className="h-24 flex items-center justify-center opacity-40 text-sm">
+                  Aún no hay fotos aprobadas. ¡Subí la tuya!
+              </div>
+          )}
+          <Button variant="ghost" className="w-full mt-2 text-xs">Ver Galería Completa</Button>
+      </Card>
+  );
+
+  const RSVPCard = () => {
+    const updateRsvp = async (status: 'CONFIRMED' | 'DECLINED') => {
+        if (!user) return;
+        // CRITICAL FIX: use user_id
+        const newRsvp: RSVP = { user_id: user.user_id, status, updated_at: new Date().toISOString() };
+        setRsvp(newRsvp); 
+
+        if (!isMockMode) {
+            const { error } = await supabase.from('rsvps').upsert(newRsvp);
+            if (error) showToast('Error actualizando asistencia', 'error');
+            else showToast('Asistencia actualizada');
+        }
+    };
+
+    return (
+        <Card title="Asistencia" icon={CheckCircle} className="md:col-span-1">
+            <div className="flex flex-col gap-2 h-full justify-center">
+               {rsvp?.status === 'CONFIRMED' ? (
+                   <div className="bg-green-500/20 text-green-300 p-4 rounded-xl text-center">
+                       <CheckCircle className="mx-auto mb-2" />
+                       <p className="font-bold">¡Confirmado!</p>
+                       <Button onClick={() => updateRsvp('DECLINED')} variant="ghost" className="mt-2 text-xs">Cambiar</Button>
+                   </div>
+               ) : (
+                   <>
+                       <p className="text-sm opacity-70 mb-2">¿Venís a la fiesta?</p>
+                       <Button onClick={() => updateRsvp('CONFIRMED')} variant="success" className="w-full">¡Sí, voy!</Button>
+                       <Button onClick={() => updateRsvp('DECLINED')} variant="ghost" className="w-full text-xs opacity-50">No puedo :(</Button>
+                   </>
+               )}
+            </div>
+        </Card>
+    );
   };
 
   const PhotoUploadCard = () => {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [uploading, setUploading] = useState(false);
 
-    const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files && e.target.files[0] && user) {
-            setUploading(true);
-            const file = e.target.files[0];
-            
-            if (isMockMode) {
-                await new Promise(r => setTimeout(r, 1500));
-                showToast('Foto subida (Simulación)');
-                setUploading(false);
-                return;
-            }
+    const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (!e.target.files || e.target.files.length === 0) return;
+        const file = e.target.files[0];
+        setUploading(true);
 
-            const fileName = `${user.id}/${Date.now()}.${file.name.split('.').pop()}`;
-            try {
-                const { error: uploadErr } = await supabase.storage.from('user_photos').upload(fileName, file);
-                if (uploadErr) throw uploadErr;
-
-                await supabase.from('photos').insert({ user_id: user.id, storage_path: fileName, status: 'PENDING', is_featured: false });
-                showToast('Foto subida! Esperando aprobación.');
-            } catch (err) {
-                showToast('Error al subir foto', 'error');
-            } finally {
-                setUploading(false);
-            }
+        if (isMockMode) {
+            setTimeout(() => {
+                 setUploading(false);
+                 showToast('Foto subida (Modo Demo)');
+            }, 1000);
+            return;
         }
+
+        // CRITICAL FIX: use user!.user_id
+        const fileName = `${user!.user_id}/${Date.now()}_${file.name}`;
+        const { error: uploadError } = await supabase.storage.from('user_photos').upload(fileName, file);
+
+        if (uploadError) {
+            showToast('Error subiendo foto', 'error');
+        } else {
+            await supabase.from('photos').insert({
+                user_id: user!.user_id, // CRITICAL FIX
+                storage_path: fileName,
+                status: 'PENDING',
+                is_featured: false
+            });
+            showToast('Foto enviada a aprobación');
+        }
+        setUploading(false);
     };
 
     return (
-        <Card title="Fotos con Gemma" icon={Camera} className="md:col-span-1">
-             <div className="flex flex-col items-center justify-center h-full text-center">
-                 <div onClick={() => fileInputRef.current?.click()} className="w-16 h-16 rounded-full bg-white/5 border-2 border-dashed border-white/20 flex items-center justify-center cursor-pointer hover:bg-white/10 transition-colors mb-2">
-                     {uploading ? <Loader2 className="animate-spin" /> : <Upload />}
-                 </div>
-                 <p className="text-xs font-bold">Subí tus recuerdos</p>
-                 <input type="file" ref={fileInputRef} onChange={handleFile} accept="image/*" className="hidden" />
-             </div>
+        <Card title="Subí tu Foto" icon={Camera} className="md:col-span-1">
+            <div className="h-full flex flex-col items-center justify-center border-2 border-dashed border-white/10 rounded-xl p-4 hover:border-[var(--color-primary)] transition-colors cursor-pointer" onClick={() => fileInputRef.current?.click()}>
+                <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleUpload} />
+                {uploading ? <Loader2 className="animate-spin" /> : <Upload className="mb-2 opacity-50" />}
+                <p className="text-xs text-center font-bold">Tocá para subir</p>
+                <p className="text-[10px] opacity-50 text-center">Será parte del show</p>
+            </div>
         </Card>
     );
   };
 
-  const AdminPanel = () => {
-      const [activeTab, setActiveTab] = useState<'SYSTEM'|'THEME'|'GUESTS'>('SYSTEM');
-      const [newCode, setNewCode] = useState('');
-      const [invites, setInvites] = useState<InviteCodeType[]>([]);
-      const [loadingInvites, setLoadingInvites] = useState(false);
+  const ChatCard = () => {
+    const [text, setText] = useState('');
+    
+    const sendMessage = async () => {
+        if (!text.trim()) return;
+        const msgText = text;
+        setText('');
 
-      useEffect(() => {
-          let mounted = true;
-          if (activeTab === 'GUESTS' && !isMockMode) {
-              const fetchInvites = async () => {
-                 setLoadingInvites(true);
-                 try {
-                     // Safer fetch: remove server-side ordering to prevent index errors
-                     const { data, error } = await supabase.from('invites').select('*');
-                     if (error) throw error;
-                     
-                     if (mounted && data) {
-                         // Sort in client side safely
-                         const sorted = (data as any[]).sort((a, b) => 
-                            (b.created_at || '').localeCompare(a.created_at || '')
-                         );
-                         setInvites(sorted);
-                     }
-                 } catch (err: any) {
-                     console.error("Error fetching invites:", err);
-                     if (mounted) showToast("Error al cargar lista", "error");
-                 } finally {
-                     if (mounted) setLoadingInvites(false);
-                 }
-              };
-              fetchInvites();
-          }
-          return () => { mounted = false; };
-      }, [activeTab]);
+        if (isMockMode) {
+            setMessages(prev => [...prev, { id: Date.now(), user_id: user!.user_id, text: msgText, created_at: new Date().toISOString(), profiles: user! }]);
+            return;
+        }
 
-      const createInvite = async () => {
-          if (isMockMode) { showToast('Modo Demo: No se guarda en DB'); return; }
-          const codeUpper = newCode.toUpperCase();
-          if (!codeUpper) return;
-          
-          setLoadingInvites(true);
-          try {
-            const { error } = await supabase.from('invites').insert({ code: codeUpper, segment: 'YOUNG', is_used: false });
-            if (!error) { 
-                showToast('Código creado'); 
-                setNewCode('');
-                // Optimistic update
-                const newInvite: InviteCodeType = { code: codeUpper, segment: UserSegment.YOUNG, is_used: false };
-                setInvites(prev => [newInvite, ...(prev || [])]);
-            } else {
-                showToast('Error al crear: ' + error.message, 'error');
-            }
-          } catch(e) {
-            showToast('Error desconocido', 'error');
-          } finally {
-            setLoadingInvites(false);
-          }
-      };
+        await supabase.from('chat_messages').insert({
+            user_id: user!.user_id, // CRITICAL FIX
+            text: msgText
+        });
+    };
 
-      const updateTheme = async (key: keyof ThemeConfig, val: string) => {
-          const newTheme = { ...theme, [key]: val };
-          setTheme(newTheme);
-          if (!isMockMode) await supabase.from('theme_config').update({ [key]: val }).eq('id', 1);
-      };
-
-      return (
-          <div className="p-6 bg-black/90 min-h-screen">
-              <div className="flex justify-between items-center mb-6">
-                  <h2 className="text-2xl font-bold text-[var(--color-primary)]">Admin Panel</h2>
-                  <Button onClick={() => setView('HOME')} variant="ghost">Volver</Button>
-              </div>
-
-              <div className="flex gap-4 mb-6 border-b border-white/10 pb-2 overflow-x-auto">
-                  <button onClick={() => setActiveTab('SYSTEM')} className={`pb-2 whitespace-nowrap px-2 ${activeTab === 'SYSTEM' ? 'text-[var(--color-primary)] border-b-2 border-[var(--color-primary)]' : 'opacity-50'}`}>Sistema</button>
-                  <button onClick={() => setActiveTab('GUESTS')} className={`pb-2 whitespace-nowrap px-2 ${activeTab === 'GUESTS' ? 'text-[var(--color-primary)] border-b-2 border-[var(--color-primary)]' : 'opacity-50'}`}>Invitados</button>
-                  <button onClick={() => setActiveTab('THEME')} className={`pb-2 whitespace-nowrap px-2 ${activeTab === 'THEME' ? 'text-[var(--color-primary)] border-b-2 border-[var(--color-primary)]' : 'opacity-50'}`}>Diseño</button>
-              </div>
-
-              {activeTab === 'SYSTEM' && (
-                  <div className="animate-in fade-in space-y-6">
-                      <div className={`p-4 rounded-xl border ${isMockMode ? 'bg-orange-500/10 border-orange-500 text-orange-200' : 'bg-green-500/10 border-green-500 text-green-200'}`}>
-                          <div className="flex items-center gap-3 mb-2 font-bold text-lg">
-                              {isMockMode ? <WifiOff /> : <Wifi />}
-                              {isMockMode ? 'Modo Demo (Offline)' : 'Conectado a Supabase'}
-                          </div>
-                          <p className="opacity-80 text-sm">
-                              {isMockMode 
-                                ? 'La app está usando datos falsos porque no se encontraron las variables de entorno válidas.' 
-                                : 'La base de datos está conectada y sincronizando en tiempo real.'}
-                          </p>
-                      </div>
-
-                      <div className="bg-white/5 p-6 rounded-xl border border-white/10">
-                          <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><Database size={18}/> Configuración para Deploy</h3>
-                          <p className="text-sm opacity-70 mb-4">Para conectar la base de datos real, agregá estas variables en Vercel/Netlify:</p>
-                          
-                          <div className="space-y-4">
-                              <div>
-                                  <label className="text-xs uppercase font-bold opacity-50">Project URL (VITE_SUPABASE_URL)</label>
-                                  <div className="flex gap-2 mt-1">
-                                      <code className="bg-black/40 p-3 rounded block w-full font-mono text-sm text-yellow-500 overflow-hidden text-ellipsis">
-                                          {(import.meta as any).env?.VITE_SUPABASE_URL || 'FALTANTE'}
-                                      </code>
-                                  </div>
-                              </div>
-                              <div>
-                                  <label className="text-xs uppercase font-bold opacity-50">Anon Key (VITE_SUPABASE_ANON_KEY)</label>
-                                  <div className="flex gap-2 mt-1">
-                                      <code className="bg-black/40 p-3 rounded block w-full font-mono text-sm text-yellow-500 overflow-hidden text-ellipsis">
-                                          {(import.meta as any).env?.VITE_SUPABASE_ANON_KEY ? '••••••••••••••••' : 'FALTANTE'}
-                                      </code>
-                                  </div>
-                              </div>
-                          </div>
-                      </div>
-                  </div>
-              )}
-
-              {activeTab === 'GUESTS' && (
-                  <div className="animate-in fade-in">
-                      <div className="bg-white/5 p-4 rounded-xl mb-6 flex gap-2">
-                          <Input value={newCode} onChange={(e: any) => setNewCode(e.target.value)} placeholder="NUEVO CÓDIGO" className="uppercase" />
-                          <Button onClick={createInvite} disabled={loadingInvites}>Crear</Button>
-                      </div>
-                      
-                      {loadingInvites && <div className="text-center py-4"><Loader2 className="animate-spin inline mr-2"/>Cargando...</div>}
-                      
-                      {isMockMode ? (
-                          <div className="text-center opacity-50 p-10">Lista de invitados no disponible en Demo.</div>
-                      ) : (
-                          <div className="space-y-2">
-                              {!loadingInvites && invites && invites.length === 0 && <p className="opacity-50 text-center py-4">No hay invitaciones creadas aún.</p>}
-                              
-                              {/* Defensive rendering to prevent crashes if invites is null/undefined */}
-                              {invites && Array.isArray(invites) && invites.map(i => (
-                                  <div key={i.code} className="p-3 bg-white/5 rounded border border-white/5 flex justify-between">
-                                      <span>{i.code}</span>
-                                      <span className={i.is_used ? 'text-red-400' : 'text-green-400'}>{i.is_used ? 'Usado' : 'Libre'}</span>
-                                  </div>
-                              ))}
-                          </div>
-                      )}
-                  </div>
-              )}
-
-              {activeTab === 'THEME' && (
-                  <div className="animate-in fade-in">
-                       <label className="block text-sm opacity-70 mb-2">Color Principal</label>
-                       <div className="flex gap-2">
-                            <input type="color" value={theme.color_primary} onChange={(e) => updateTheme('color_primary', e.target.value)} className="h-10 w-20 rounded cursor-pointer" />
-                            <Input value={theme.color_primary} readOnly />
-                       </div>
-                  </div>
-              )}
-          </div>
-      );
+    return (
+        <Card title="Chat Invitados" icon={MessageCircle} className="md:col-span-2 row-span-2 h-[400px]">
+            <div className="flex-1 overflow-y-auto space-y-3 pr-2 mb-4 scrollbar-thin scrollbar-thumb-white/10">
+                {messages.map((msg) => (
+                    <div key={msg.id} className={`flex gap-3 ${msg.user_id === user?.user_id ? 'flex-row-reverse' : ''}`}>
+                         <div className="w-8 h-8 rounded-full bg-[var(--color-primary)]/20 flex items-center justify-center text-[10px] font-bold overflow-hidden shrink-0">
+                             {msg.profiles?.avatar_url ? <img src={msg.profiles.avatar_url} className="w-full h-full object-cover"/> : (msg.profiles?.name?.[0] || '?')}
+                         </div>
+                         <div className={`p-3 rounded-2xl max-w-[80%] text-sm ${msg.user_id === user?.user_id ? 'bg-[var(--color-primary)] text-white rounded-tr-none' : 'bg-white/5 rounded-tl-none'}`}>
+                             <p className="font-bold text-[10px] opacity-70 mb-1">{msg.profiles?.name}</p>
+                             {msg.text}
+                         </div>
+                    </div>
+                ))}
+            </div>
+            <div className="flex gap-2">
+                <Input value={text} onChange={(e: any) => setText(e.target.value)} placeholder="Escribí un mensaje..." className="text-sm py-2" />
+                <Button onClick={sendMessage} className="px-3" icon={Send} />
+            </div>
+        </Card>
+    );
   };
 
   // --- Render ---
@@ -677,6 +784,9 @@ export default function App() {
     </div>
   );
 
+  if (view === 'PROFILE_SETUP') return <ProfileSetup />;
+  if (view === 'ADMIN') return <AdminPanel />;
+  
   if (view === 'AUTH') {
     return (
       <div className="min-h-screen flex items-center justify-center p-4 bg-[url('https://images.unsplash.com/photo-1516450360452-9312f5e86fc7?auto=format&fit=crop&q=80')] bg-cover bg-center">
@@ -689,22 +799,23 @@ export default function App() {
                   <p className="text-lg mb-8 opacity-80">Ingresá tu código de invitación</p>
                   {isMockMode && <div className="mb-4 text-xs bg-yellow-500/20 text-yellow-200 p-2 rounded">⚡ Modo Demo Offline Activo</div>}
                   <div className="space-y-4">
-                    <Input value={inviteCode} onChange={(e: any) => setInviteCode(e.target.value.toUpperCase())} placeholder="CÓDIGO (Ej: GEMMA-JOVEN)" className="text-center text-xl tracking-widest uppercase font-mono" />
+                    <Input value={inviteCode} onChange={(e: any) => setInviteCode(e.target.value.toUpperCase())} placeholder="CÓDIGO (Ej: JOVEN-123456)" className="text-center text-xl tracking-widest uppercase font-mono" />
                     {authError && <div className="text-red-400 text-sm font-bold bg-red-500/10 p-2 rounded">{authError}</div>}
-                    <Button onClick={handleAuth} className="w-full py-4 text-lg">Ingresar</Button>
-                    <p className="text-xs opacity-50 mt-4">Tip: Usá 'ADMIN-SETUP' para configurar.</p>
+                    <Button onClick={handleAuth} className="w-full py-4 text-lg">Validar Código</Button>
+                    <p className="text-xs opacity-50 mt-4">¿Sos Admin? Usá 'ADMIN-SETUP'</p>
                   </div>
               </>
           ) : (
-              // EMAIL/ADMIN FALLBACK
+              // EMAIL REQUIRED
               <>
-                  <p className="text-lg mb-4 opacity-80">{inviteCode === 'ADMIN-SETUP' ? 'Acceso Administrador' : 'Ingreso con Email'}</p>
-                  <p className="text-xs opacity-60 mb-6">El acceso anónimo está desactivado. {inviteCode === 'ADMIN-SETUP' ? 'Ingresá tus credenciales de admin.' : 'Usá tu email para validar el código.'}</p>
+                  <p className="text-lg mb-4 opacity-80">Validar Identidad</p>
+                  <p className="text-xs opacity-60 mb-6">Para asegurar tu lugar, necesitamos validar tu email.</p>
                   
                   {magicLinkSent ? (
-                      <div className="bg-green-500/20 p-4 rounded-xl text-green-200">
+                      <div className="bg-green-500/20 p-4 rounded-xl text-green-200 animate-in zoom-in">
                           <Mail size={40} className="mx-auto mb-2" />
-                          <p>¡Listo! Revisá tu correo y hacé clic en el link mágico para entrar.</p>
+                          <p className="font-bold">¡Revisá tu correo!</p>
+                          <p className="text-xs mt-2 opacity-80">Te enviamos un link mágico para entrar sin contraseña.</p>
                           <Button onClick={() => { setMagicLinkSent(false); setAuthMode('CODE'); }} variant="ghost" className="mt-4 text-sm">Volver</Button>
                       </div>
                   ) : (
@@ -716,11 +827,11 @@ export default function App() {
                         {authError && <div className="text-red-400 text-sm font-bold bg-red-500/10 p-2 rounded">{authError}</div>}
                         
                         <Button onClick={handleEmailAuth} className="w-full py-4 text-lg">
-                            {inviteCode === 'ADMIN-SETUP' ? 'Entrar / Registrar' : 'Enviar Link de Acceso'}
+                            {inviteCode === 'ADMIN-SETUP' ? 'Entrar' : 'Enviar Link de Acceso'}
                         </Button>
                         
                         <Button onClick={() => { setAuthMode('CODE'); setAuthError(''); }} variant="ghost" className="w-full text-sm">
-                           Volver
+                           Cambiar Código
                         </Button>
                       </div>
                   )}
@@ -731,8 +842,6 @@ export default function App() {
       </div>
     );
   }
-
-  if (view === 'ADMIN') return <AdminPanel />;
 
   return (
     <div className="min-h-screen pb-20 p-4 md:p-8 max-w-7xl mx-auto">
@@ -747,9 +856,12 @@ export default function App() {
             </div>
         </header>
 
-        <div className="mb-8 bg-gradient-to-r from-[var(--color-primary)] to-[var(--color-accent)] rounded-2xl p-6 text-white shadow-lg">
-             <h2 className="text-2xl font-bold mb-2">🎉 {eventConfig.welcome_message}</h2>
-             <p className="opacity-90">{eventConfig.location_name}</p>
+        <div className="mb-8 bg-gradient-to-r from-[var(--color-primary)] to-[var(--color-accent)] rounded-2xl p-6 text-white shadow-lg relative overflow-hidden">
+             <div className="relative z-10">
+                 <h2 className="text-2xl font-bold mb-2">🎉 {eventConfig.welcome_message}</h2>
+                 <p className="opacity-90 flex items-center gap-2"><MapPin size={16}/> {eventConfig.location_name}</p>
+             </div>
+             <div className="absolute right-0 top-0 h-full w-1/3 bg-white/10 -skew-x-12 transform translate-x-10" />
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 auto-rows-auto">
@@ -760,17 +872,19 @@ export default function App() {
                  </div>
             </Card>
             <RSVPCard />
+            <TableCard />
             <Card title="Ubicación" icon={MapPin} className="md:col-span-1">
                 <p className="font-bold text-lg mb-2">{eventConfig.location_name}</p>
                 <Button onClick={() => window.open(eventConfig.location_maps_url, '_blank')} variant="secondary" className="w-full text-xs">Ver Mapa</Button>
             </Card>
+            <GalleryCard />
+            <PhotoUploadCard />
+            <ChatCard />
             <Card title="Reglas" icon={Info} className="md:col-span-1">
                  <ul className="text-xs space-y-2 opacity-80">
                      <li className="flex gap-2"><CheckCircle size={12} className="text-[var(--color-primary)]"/> {user?.segment === 'YOUNG' ? eventConfig.dress_code_young : eventConfig.dress_code_adult}</li>
                  </ul>
             </Card>
-            <PhotoUploadCard />
-            <ChatCard />
         </div>
 
         {toast && <div className={`fixed bottom-4 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full shadow-2xl z-50 font-bold animate-in fade-in slide-in-from-bottom-5 ${toast.type === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'}`}>{toast.msg}</div>}
